@@ -1007,20 +1007,30 @@ def branded_pdf_report(
         return "older_adult"
 
     def current_ritu():
-        # approximate Indian ritu mapping
+        """Return approximate Indian ritu (season) name for current month."""
         m = datetime.now().month
+        # approximate mapping (six ritus, grouped by months)
+        # Dec-Jan -> Hemanta (winter)
         if m in (12, 1):
             return "Hemanta"
-        if m in (2, 3):
+        # Feb -> Shishira (late winter / pre-spring)
+        if m == 2:
             return "Shishira"
-        if m in (4, 5):
+        # Mar-Apr -> Vasanta (spring)
+        if m in (3, 4):
+            return "Vasanta"
+        # May-Jun -> Grishma (summer)
+        if m in (5, 6):
             return "Grishma"
-        if m in (6, 7):
+        # Jul-Aug -> Varsha (monsoon)
+        if m in (7, 8):
             return "Varsha"
-        if m in (8, 9):
+        # Sep-Oct -> Sharad (early autumn / post-monsoon)
+        if m in (9, 10):
             return "Sharad"
-        if m in (10, 11):
-            return "Hemanta/Sharad"  # transitional
+        # Nov -> Hemanta/Sharad transition (winter arriving)
+        if m == 11:
+            return "Hemanta/Sharad"
         return "Unknown"
 
     def dom(d):
