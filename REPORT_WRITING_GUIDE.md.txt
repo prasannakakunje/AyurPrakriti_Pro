@@ -1,0 +1,93 @@
+# AyurPrakriti Report — Writing Guide (Clinical Tone & Templates)
+
+## 1. Principle (single rule)
+**Never use “you.”**  
+All clinical observations, interpretations and recommendations must be written in objective, third-person tone.
+
+---
+
+## 2. Structure (required order)
+1. Cover (logo, clinic name, generation timestamp)
+2. Executive Summary (3–4 short lines; factual)
+3. Prakriti (Constitution) — table
+4. Vikriti (Current state) — table
+5. Psychometric Snapshot — short bullets
+6. Integrated Interpretation — combine 3–5 lines (Prakriti + Vikriti + Psych)
+7. Dosha-specific Guidance — bullet lists
+8. Seasonal Guidance (Ritucharya) — include Vasanta
+9. Practical Recommended Sequence (Immediate / This week / This month) — vertical
+10. Recommended Work Domains (career) — ranked with rationale
+11. Relationship & Health Tips — merged list
+12. Appendix / Transformation Plan (optional)
+13. Doctor’s Note — highlighted box (optional)
+14. Footer — contact & page numbers
+
+---
+
+## 3. Tone & Vocabulary
+- Use neutral, factual statements:
+  - ✔ "Pitta is elevated."
+  - ✔ "Vata imbalance may present with dryness or restlessness."
+  - ✖ "You are likely to feel restless."
+- Use words: "recommended", "advised", "supports", "favours", "encouraged"
+- Avoid imperative commands ("Do X"). Prefer "is recommended" or "is advised".
+
+---
+
+## 4. Dosha wording templates
+- Vata guidance:
+  - "Warmth and routine support Vata balance."
+  - "Gentle oil application and warm meals are advised."
+- Pitta guidance:
+  - "Cooling practices and calming breathwork support Pitta regulation."
+  - "Cooling foods and hydration are recommended."
+- Kapha guidance:
+  - "Light, dry, and stimulating practices support Kapha reduction."
+  - "Avoid heavy, oily, and sugary foods."
+
+---
+
+## 5. Seasonal (Ritucharya) templates — all 6 ritus
+- Shishira (late winter): "Warmth and nourishing warm foods; protection from cold winds; light abhyanga."
+- Vasanta (spring): "Light, warming and slightly drying foods; reduce heavy sweets; gentle morning movement to reduce Kapha."
+- Grishma (summer): "Cooling foods; adequate hydration; avoid peak heat exposure."
+- Varsha (monsoon): "Favor freshly cooked, dry foods; support digestion with light spices."
+- Sharad (post-monsoon): "Light warm breakfasts; re-establish regular activity and digestive support."
+- Hemanta (early winter): "Nourishing warm foods; mild abhyanga; protect from cold exposure."
+
+---
+
+## 6. Psychometric phrasing
+- Use neutral descriptive titles: "Anxiety", "Burnout", "Stress", "Resilience"
+- Example: "Psychometric profile indicates predominance of anxiety features; short-term calming practices recommended."
+
+---
+
+## 7. Career suggestion template
+- Use: "Role — Reasoning (Prakriti hint; Vikriti hint; Psych hint)."
+- Example:
+  - "Clinical researcher — Predominant Pitta constitution; current balanced Vikriti; suited for analytical, structured tasks (score: 78)."
+
+---
+
+## 8. Doctor’s note guidance (highlight box)
+- Short, professional, signed by clinician.
+- Tone: "The clinician notes that ...", "In the clinician's opinion, ...", "Follow-up recommended in X weeks."
+
+---
+
+## 9. Examples (direct replacements)
+- Instead of: "You should drink warm water in the morning."
+  - Use: "Warm water on waking is recommended."
+- Instead of: "You may feel more energetic in the morning."
+  - Use: "Morning periods typically show higher energy levels."
+
+---
+
+## 10. Checklist for final QA (before export)
+- No occurrence of the word "you" in the PDF text.
+- Executive summary ≤ 4 lines.
+- Charts have legend displayed or noted.
+- Relationship & health lists merged (no duplicates).
+- Doctor note present if clinician edited it on the dashboard.
+- Footer contact line completed.

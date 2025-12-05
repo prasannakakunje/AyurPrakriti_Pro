@@ -48,6 +48,88 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
+# ----------------- Helpers to add near other helpers -----------------
+import re
+
+def _neutralize_personal_tone(text: str) -> str:
+    """
+    Convert common second-person phrasing to neutral third-person clinical phrasing.
+    """
+    if not text:
+        return text
+    t = str(text)
+
+    # common phrase replacements (order matters)
+    t = re.sub(r'\b[Yy]ou\s+have\b', 'the client presents with', t)
+    t = re.sub(r'\b[Yy]ou\s+may\b', 'there may be', t)
+    t = re.sub(r'\b[Yy]ou\s+are\b', 'the client is', t)
+    t = re.sub(r'\b[Yy]ou\s+can\b', 'it may be useful to', t)
+    # fallback for isolated 'you'
+    t = re.sub(r'\b[Yy]ou\b', 'the client', t)
+
+    # avoid duplicates like "the client is is"
+    t = re.sub(r'\bthe client is the client\b', 'the client', t)
+    t = re.sub(r'\s{2,}', ' ', t)
+    return t.strip()
+
+# psychometric display label map (normalize keys -> display labels)
+_psy_label_map = {
+    "extraversion": "Extroversion",
+    "extravert": "Extroversion",
+    "extroversion": "Extroversion",
+    "openness": "Openness",
+    "agreeableness": "Agreeableness",
+    "conscientiousness": "Conscientiousness",
+    "emotionality": "Emotionality",
+    "neuroticism": "Emotionality",
+    "anxiety": "Anxiety",
+    "burnout": "Burnout",
+    "stress": "Stress",
+    # add more synonyms as used in your data
+}
+
+def _career_rationale_for_report(cr, prakriti_pct, vikriti_pct, psych_pct):
+    """
+    Produce a slightly longer, personalised rationale for career suggestions
+    using simple logic and neutralized phrasing.
+    """
+    role = cr.get("role", "Role")
+    score = cr.get("score", "")
+    reason = cr.get("reason", "") or ""
+    # neutralize the reason (remove 'you')
+    extra = _neutralize_personal_tone(reason.strip())
+
+    parts = []
+    try:
+        dominant = max(prakriti_pct, key=prakriti_pct.get)
+        parts.append(f"predominant {dominant} constitution")
+    except Exception:
+        pass
+
+    try:
+        cur = max(vikriti_pct, key=vikriti_pct.get)
+        parts.append(f"current tendency toward {cur}")
+    except Exception:
+        pass
+
+    try:
+        top_psy = max(psych_pct, key=psych_pct.get)
+        # map label if necessary
+        top_psy_label = _psy_label_map.get(top_psy.strip().lower(), top_psy.title())
+        parts.append(f"psychometric profile: {top_psy_label}")
+    except Exception:
+        pass
+
+    combined = "; ".join(p for p in parts if p)
+    if combined and extra:
+        final = f"{role} — {combined}. {extra} (score: {score})."
+    elif combined:
+        final = f"{role} — {combined}. (score: {score})."
+    elif extra:
+        final = f"{role} — {extra} (score: {score})."
+    else:
+        final = f"{role} — score {score}."
+    return final
 
 # === BEGIN: Personalised guideline & career rationale helpers ===
 def generate_simple_guideline(prakriti_pct, vikriti_pct, psych_pct):
@@ -954,53 +1036,7 @@ def _wrap_text_simple(text, chars_per_line=95):
 
 
 # ---------------- PDF builders: platypus branded + fallback canvas ----------------
-# ---- Paste this entire block and replace the old branded_pdf_report() ----
-def _career_rationale_for_report(cr, prakriti_pct, vikriti_pct, psych_pct):
-    """
-    Produce a slightly longer, personalised rationale for career suggestions
-    using simple logic based on prakriti/vikriti/psychometric hints.
-    Returns a clean neutral sentence (no 'you').
-    """
-    role = cr.get("role", "Role")
-    score = cr.get("score", "")
-    reason = cr.get("reason", "") or ""
-    parts = []
-
-    # constitution hints
-    try:
-        dominant = max(prakriti_pct, key=prakriti_pct.get)
-        parts.append(f"Predominant {dominant} constitution")
-    except Exception:
-        pass
-
-    # current state hints
-    try:
-        cur = max(vikriti_pct, key=vikriti_pct.get)
-        parts.append(f"current tendency toward {cur}")
-    except Exception:
-        pass
-
-    # psychometric hint
-    # psych_pct is expected like {'anxiety':20, 'burnout':30}
-    try:
-        top_psy = max(psych_pct, key=psych_pct.get)
-        parts.append(f"psychometric profile: {top_psy}")
-    except Exception:
-        pass
-
-    extra = reason.strip()
-    combined = "; ".join(p for p in parts if p)
-    if combined and extra:
-        final = f"{role} — {combined}. {extra} (score: {score})."
-    elif combined:
-        final = f"{role} — {combined}. (score: {score})."
-    elif extra:
-        final = f"{role} — {extra} (score: {score})."
-    else:
-        final = f"{role} — score {score}."
-    return final
-
-
+# ----------------- Full drop-in branded_pdf_report (replace your existing one) -----------------
 def branded_pdf_report(
     patient,
     prakriti_pct,
@@ -1016,30 +1052,28 @@ def branded_pdf_report(
     guideline_text=None,
     doctor_note=None,
 ):
-    """
-    Professional, clinical-tone PDF report generator (ReportLab/Platypus).
-    - Objective clinical voice everywhere (no 'you').
-    - Includes: cover, executive summary, prakriti/vikriti, psychometrics,
-      integrated interpretation, dosha guidance, seasonal guidance (Vasanta included),
-      practical timeline (vertical), career rationales, doctor note (highlighted).
-    """
     if wconf is None:
         wconf = WCONF
 
-    # prepare image paths
+    # prepare chart image paths
     p1 = TMP_DIR / f"prakriti_{int(datetime.now().timestamp())}.png"
     p2 = TMP_DIR / f"vikriti_{int(datetime.now().timestamp())}.png"
     p3 = TMP_DIR / f"psych_{int(datetime.now().timestamp())}.png"
     radar = TMP_DIR / f"radar_{int(datetime.now().timestamp())}.png"
 
-    # attempt to create chart images (helpers should exist)
+    # try generate charts (if helpers exist)
     try:
         _make_bar_chart(prakriti_pct, "Prakriti (constitutional %)", p1)
         _make_bar_chart(vikriti_pct, "Vikriti (today %)", p2)
-        _make_bar_chart(psych_pct, "Psychometric (approx %)", p3)
+        # pass psych with normalized keys for chart generation if needed
+        psych_for_chart = {}
+        for k,v in (psych_pct or {}).items():
+            lab = _psy_label_map.get(k.strip().lower(), k.title())
+            psych_for_chart[lab] = v
+        _make_bar_chart(psych_for_chart, "Psychometric (approx %)", p3)
         make_radar_chart(prakriti_pct, vikriti_pct, radar)
     except Exception:
-        logger.exception("Chart generation failed; continuing with fallback visuals")
+        logger.exception("Chart generation failed; continuing without charts")
 
     try:
         buf = BytesIO()
@@ -1051,12 +1085,10 @@ def branded_pdf_report(
             topMargin=18 * mm,
             bottomMargin=18 * mm,
         )
-
         styles = getSampleStyleSheet()
         base_font = "DejaVuSans" if DEJAVU_PATH else "Helvetica"
         accent = colors.HexColor(BRAND.get("accent_color", "#6b8cff"))
 
-        # Styles
         styles.add(ParagraphStyle(name="AP_Title", fontName=base_font, fontSize=18, leading=22, spaceAfter=6))
         styles.add(ParagraphStyle(name="AP_Small", fontName=base_font, fontSize=9, leading=11))
         styles.add(ParagraphStyle(name="AP_Heading", fontName=base_font, fontSize=12, leading=14, spaceBefore=8, spaceAfter=4, textColor=accent))
@@ -1064,8 +1096,7 @@ def branded_pdf_report(
         styles.add(ParagraphStyle(name="AP_Bullet", fontName=base_font, fontSize=10, leading=12, leftIndent=10, bulletIndent=4))
 
         flow = []
-
-        # ---- Cover / Header ----
+        # header/logo
         flow.append(Spacer(1, 6))
         logo_path = APP_DIR / "logo.png"
         try:
@@ -1073,7 +1104,7 @@ def branded_pdf_report(
                 img = RLImage(str(logo_path), width=40 * mm, height=40 * mm)
                 clinic_info = Paragraph(f"<b>{BRAND.get('clinic_name','')}</b><br/>{BRAND.get('tagline','')}", styles["AP_Body"])
                 header_t = Table([[img, clinic_info]], colWidths=[45 * mm, 120 * mm])
-                header_t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0,0), (-1,-1), 0)]))
+                header_t.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "MIDDLE"), ("LEFTPADDING", (0,0), (-1,-1), 0)]))
                 flow.append(header_t)
             else:
                 flow.append(Paragraph(f"<b>{BRAND.get('clinic_name','')}</b><br/>{BRAND.get('tagline','')}", styles["AP_Title"]))
@@ -1085,10 +1116,9 @@ def branded_pdf_report(
         flow.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["AP_Small"]))
         flow.append(Spacer(1, 8))
 
-        # Executive summary (brief)
+        # Executive summary
         flow.append(Paragraph("Executive summary", styles["AP_Heading"]))
         exec_lines = []
-        # short objective summary lines:
         try:
             dom = max(prakriti_pct, key=prakriti_pct.get)
             exec_lines.append(f"Constitutional predominance: {dom}.")
@@ -1100,65 +1130,64 @@ def branded_pdf_report(
         except Exception:
             pass
         if psych_pct:
-            top_psy = max(psych_pct, key=psych_pct.get)
-            exec_lines.append(f"Psychometric snapshot indicates: {top_psy}.")
+            try:
+                top_psy = max(psych_pct, key=psych_pct.get)
+                top_psy_label = _psy_label_map.get(top_psy.strip().lower(), top_psy.title())
+                exec_lines.append(f"Psychometric snapshot indicates: {top_psy_label}.")
+            except Exception:
+                pass
+        # sanitize wow hero if present
         if wow and wow.get("hero"):
-            exec_lines.append(wow.get("hero"))
+            hero_clean = _neutralize_personal_tone(wow.get("hero"))
+            exec_lines.append(hero_clean)
 
         for line in exec_lines:
             flow.append(Paragraph(line, styles["AP_Body"]))
         flow.append(Spacer(1, 8))
 
-        # Place charts after executive summary with legend
+        # charts & legend
         try:
             chart_cells = []
             if p1.exists():
-                img1 = RLImage(str(p1), width=85 * mm, height=45 * mm)
-                chart_cells.append(img1)
+                chart_cells.append(RLImage(str(p1), width=85 * mm, height=45 * mm))
             if p2.exists():
-                img2 = RLImage(str(p2), width=85 * mm, height=45 * mm)
-                chart_cells.append(img2)
+                chart_cells.append(RLImage(str(p2), width=85 * mm, height=45 * mm))
             if chart_cells:
                 flow.append(Table([chart_cells], colWidths=[90 * mm]*len(chart_cells)))
                 flow.append(Spacer(1, 6))
-            # psych
             if p3.exists():
-                img3 = RLImage(str(p3), width=170 * mm, height=35 * mm)
-                flow.append(img3); flow.append(Spacer(1, 6))
-            # legend note (explicitly present)
-            legend_text = "Legend — Blue: Prakriti (baseline); Green: Vikriti (current); Purple: Psychometric"
-            flow.append(Paragraph(legend_text, styles["AP_Small"]))
-            flow.append(Spacer(1, 6))
+                flow.append(RLImage(str(p3), width=170 * mm, height=35 * mm)); flow.append(Spacer(1,6))
+            flow.append(Paragraph("Legend — Blue: Prakriti; Green: Vikriti; Purple: Psychometric", styles["AP_Small"]))
+            flow.append(Spacer(1,6))
         except Exception:
-            logger.exception("Adding chart images failed")
+            logger.exception("Adding charts failed")
 
-        # ---- Prakriti & Vikriti tables ----
+        # Prakriti / Vikriti
         flow.append(Paragraph("Prakriti — constitutional distribution", styles["AP_Heading"]))
-        pp = [[k, f"{v} %"] for k, v in prakriti_pct.items()]
+        pp = [[k, f"{v} %"] for k,v in (prakriti_pct or {}).items()]
         if pp:
             tpp = Table(pp, colWidths=[80 * mm, 80 * mm])
-            tpp.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.25, colors.lightgrey), ("LEFTPADDING", (0,0), (-1,-1), 6)]))
-            flow.append(tpp)
-            flow.append(Spacer(1, 6))
+            tpp.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.lightgrey), ("LEFTPADDING",(0,0),(-1,-1),6)]))
+            flow.append(tpp); flow.append(Spacer(1,6))
 
         flow.append(Paragraph("Vikriti — current distribution (today)", styles["AP_Heading"]))
-        vp = [[k, f"{v} %"] for k, v in vikriti_pct.items()]
+        vp = [[k, f"{v} %"] for k,v in (vikriti_pct or {}).items()]
         if vp:
             tvp = Table(vp, colWidths=[80 * mm, 80 * mm])
-            tvp.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.25, colors.lightgrey), ("LEFTPADDING", (0,0), (-1,-1), 6)]))
-            flow.append(tvp)
-            flow.append(Spacer(1, 8))
+            tvp.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.lightgrey), ("LEFTPADDING",(0,0),(-1,-1),6)]))
+            flow.append(tvp); flow.append(Spacer(1,8))
 
-        # ---- Psychometric snapshot ----
+        # Psychometric snapshot (use mapped labels)
         flow.append(Paragraph("Psychometric snapshot", styles["AP_Heading"]))
         if psych_pct:
-            for k, v in psych_pct.items():
-                flow.append(Paragraph(f"{k.title()}: {v} %", styles["AP_Body"]))
+            for k,v in psych_pct.items():
+                label = _psy_label_map.get(k.strip().lower(), k.title())
+                flow.append(Paragraph(f"{label}: {v} %", styles["AP_Body"]))
         else:
             flow.append(Paragraph("No psychometric data available.", styles["AP_Body"]))
-        flow.append(Spacer(1, 8))
+        flow.append(Spacer(1,8))
 
-        # ---- Integrated interpretation (clinical) ----
+        # Integrated interpretation
         flow.append(Paragraph("Integrated interpretation", styles["AP_Heading"]))
         integrated_lines = []
         if prakriti_pct:
@@ -1176,7 +1205,7 @@ def branded_pdf_report(
         if psych_pct:
             try:
                 top_psy = max(psych_pct, key=psych_pct.get)
-                integrated_lines.append(f"Psychometric profile suggests predominance of {top_psy}.")
+                integrated_lines.append(f"Psychometric profile suggests predominance of {_psy_label_map.get(top_psy.strip().lower(), top_psy.title())}.")
             except Exception:
                 pass
         if integrated_lines:
@@ -1184,31 +1213,19 @@ def branded_pdf_report(
                 flow.append(Paragraph(l, styles["AP_Body"]))
         else:
             flow.append(Paragraph("No integrated interpretation available.", styles["AP_Body"]))
-        flow.append(Spacer(1, 8))
+        flow.append(Spacer(1,8))
 
-        # ---- Dosha-specific guidance (clean, clinical) ----
+        # Dosha-specific guidance (simple templates)
         flow.append(Paragraph("Dosha-specific guidance", styles["AP_Heading"]))
-
-        # Helper small templates for dosha guidance
         def _dosha_guidance_text(dosha):
             if dosha == "Vata":
-                return [
-                    "Warmth, routine, and gentle oil application support Vata balance.",
-                    "Avoid excessive cold, prolonged fasting, and irregular sleep."
-                ]
+                return ["Warmth, routine and gentle oil application support Vata balance.", "Avoid excessive cold, prolonged fasting and irregular sleep."]
             if dosha == "Pitta":
-                return [
-                    "Cooling routines and calming practices support Pitta balance.",
-                    "Reduce spicy, sour, and excessively heated foods during Pitta predominance."
-                ]
+                return ["Cooling routines and calming practices support Pitta balance.", "Reduce spicy, sour and excessively heated foods."]
             if dosha == "Kapha":
-                return [
-                    "Light, warm, and stimulating practices support Kapha balance.",
-                    "Reduce heavy, oily, and overly sweet foods and avoid daytime oversleeping."
-                ]
-            return ["General supportive measures: regular meals, warm hydration, and simple movement."]
+                return ["Light, warm and stimulating practices support Kapha balance.", "Reduce heavy, oily and overly sweet foods and avoid daytime oversleeping."]
+            return ["General supportive measures: regular meals, warm hydration and simple movement."]
 
-        # Provide dosha-specific blocks based on prakriti/vikriti dominance
         try:
             dom_pr = max(prakriti_pct, key=prakriti_pct.get)
         except Exception:
@@ -1218,24 +1235,23 @@ def branded_pdf_report(
         except Exception:
             dom_vk = None
 
-        # show both constitution and current imbalance guidance
         if dom_pr:
             flow.append(Paragraph(f"Constitutional (Prakriti) guidance — Predominant {dom_pr}", styles["AP_Body"]))
             for l in _dosha_guidance_text(dom_pr):
                 flow.append(Paragraph(f"• {l}", styles["AP_Body"]))
-            flow.append(Spacer(1, 4))
+            flow.append(Spacer(1,4))
 
         if dom_vk and dom_vk != dom_pr:
             flow.append(Paragraph(f"Current imbalance (Vikriti) guidance — {dom_vk}", styles["AP_Body"]))
             for l in _dosha_guidance_text(dom_vk):
                 flow.append(Paragraph(f"• {l}", styles["AP_Body"]))
-            flow.append(Spacer(1, 6))
+            flow.append(Spacer(1,6))
 
-        # ---- Seasonal guidance (Ritucharya) - full six ritus including Vasanta ----
+        # Seasonal guidance (Ritucharya) including Vasanta
         flow.append(Paragraph("Seasonal guidance (Ritucharya)", styles["AP_Heading"]))
         ritu_lines = [
             ("Shishira (late winter)", "Warmth, warm unctuous foods, protection from cold winds; light abhyanga recommended."),
-            ("Vasanta (spring)", "Light, warm, and slightly drying foods; reduce heavy sweets and dairy; gentle morning movement to reduce Kapha."),
+            ("Vasanta (spring)", "Light, warm and slightly drying foods; reduce heavy sweets and dairy; gentle morning movement to reduce Kapha."),
             ("Grishma (summer)", "Cooling foods and adequate hydration; avoid midday heat and heavy exertion."),
             ("Varsha (monsoon)", "Prefer freshly cooked, easily digestible foods; support digestion with light spices (e.g., cumin, coriander)."),
             ("Sharad (post-monsoon)", "Light, warm breakfasts; gradual reintroduction of regular activity; favour digestive restoration."),
@@ -1243,123 +1259,105 @@ def branded_pdf_report(
         ]
         for title, text in ritu_lines:
             flow.append(Paragraph(f"• {title}: {text}", styles["AP_Body"]))
-        flow.append(Spacer(1, 8))
+        flow.append(Spacer(1,8))
 
-        # ---- Practical recommended sequence (vertical) ----
+        # Practical sequence (immediate/this week/this month)
         flow.append(Paragraph("Recommended sequence — immediate to short-term", styles["AP_Heading"]))
         seq = [
             ("Immediate support", ["Warm water on waking; short calming breathing practice; favour cooked warm meals."]),
             ("This week", ["Daily 20–30 min gentle movement; regular bed/wake times; small digestion-support measures."]),
             ("This month", ["Establish simple morning routine; aim for consistent meal timings; build a 2–3 day/week light movement habit."]),
         ]
-        # vertical layout
-        seq_cells = [[Paragraph(f"<b>{t}</b><br/>{'<br/>'.join(b)}", styles["AP_Body"])] for t, b in seq]
+        seq_cells = [[Paragraph(f"<b>{t}</b><br/>{'<br/>'.join(b)}", styles["AP_Body"])] for t,b in seq]
         seq_tbl = Table(seq_cells, colWidths=[(A4[0] - 36 * mm)])
-        seq_tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,-1), colors.Color(0.98,0.98,0.95)),
-            ("BOX", (0,0), (-1,-1), 0.5, colors.lightgrey),
-            ("LEFTPADDING", (0,0), (-1,-1), 6),
-            ("RIGHTPADDING", (0,0), (-1,-1), 6),
-            ("TOPPADDING", (0,0), (-1,-1), 6),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-        ]))
-        flow.append(seq_tbl)
-        flow.append(Spacer(1, 8))
+        seq_tbl.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),colors.Color(0.98,0.98,0.95)),("BOX",(0,0),(-1,-1),0.5,colors.lightgrey),("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)]))
+        flow.append(seq_tbl); flow.append(Spacer(1,8))
 
-        # ---- Recommendations: Career (with improved rationale) ----
+        # Career recommendations with improved rationale (neutralized)
         flow.append(Paragraph("Recommended work domains (ranked)", styles["AP_Heading"]))
         if career_recs:
             for cr in career_recs[:8]:
-                rationale = _career_rationale_for_report(cr, prakriti_pct, vikriti_pct, psych_pct)
+                rationale = _career_rationale_for_report(cr, prakriti_pct, vikriti_pct, psych_pct or {})
                 flow.append(Paragraph(f"• {rationale}", styles["AP_Bullet"]))
         else:
             flow.append(Paragraph("No career recommendations available.", styles["AP_Body"]))
-        flow.append(Spacer(1, 8))
+        flow.append(Spacer(1,8))
 
-        # ---- Relationship tips ----
+        # Relationship tips (neutralize)
         flow.append(Paragraph("Relationship & interpersonal tips", styles["AP_Heading"]))
         if rel_tips:
             for t in rel_tips:
-                # each t is expected to be (title, explanation)
-                flow.append(Paragraph(f"• <b>{t[0]}</b> — {t[1]}", styles["AP_Body"]))
+                title = _neutralize_personal_tone(t[0]) if isinstance(t, (list,tuple)) and t else (t if isinstance(t,str) else "")
+                body  = _neutralize_personal_tone(t[1]) if isinstance(t, (list,tuple)) and len(t)>1 else ""
+                flow.append(Paragraph(f"• <b>{title}</b> — {body}", styles["AP_Body"]))
         else:
             flow.append(Paragraph("No relationship tips available.", styles["AP_Body"]))
-        flow.append(Spacer(1, 8))
+        flow.append(Spacer(1,8))
 
-        # ---- Health (diet & lifestyle) ----
+        # Health suggestions (neutralize)
         flow.append(Paragraph("Health — diet & lifestyle suggestions", styles["AP_Heading"]))
         if health_recs:
-            diet = health_recs.get("diet", [])
-            lifestyle = health_recs.get("lifestyle", [])
+            for d in health_recs.get("diet", []):
+                flow.append(Paragraph(f"• {_neutralize_personal_tone(d)}", styles["AP_Bullet"]))
+            for l in health_recs.get("lifestyle", []):
+                flow.append(Paragraph(f"• {_neutralize_personal_tone(l)}", styles["AP_Bullet"]))
             herbs = health_recs.get("herbs", [])
-            if diet:
-                for d in diet:
-                    flow.append(Paragraph(f"• {d}", styles["AP_Bullet"]))
-            if lifestyle:
-                for l in lifestyle:
-                    flow.append(Paragraph(f"• {l}", styles["AP_Bullet"]))
             if herbs:
                 flow.append(Paragraph("Herbs & cautions:", styles["AP_Body"]))
                 for h in herbs:
-                    flow.append(Paragraph(f"• {h}", styles["AP_Bullet"]))
+                    flow.append(Paragraph(f"• {_neutralize_personal_tone(h)}", styles["AP_Bullet"]))
         else:
             flow.append(Paragraph("No health suggestions available.", styles["AP_Body"]))
-        flow.append(Spacer(1, 8))
+        flow.append(Spacer(1,8))
 
-        # ---- Insert personalised guideline text block if provided ----
+        # Personalised guideline block (sanitised)
         if guideline_text:
             flow.append(PageBreak())
             flow.append(Paragraph("Personalised guideline", styles["AP_Heading"]))
             for para in guideline_text.split("\n\n"):
                 if para.strip():
-                    flow.append(Paragraph(para.strip().replace("\n", "<br/>"), styles["AP_Body"]))
-                    flow.append(Spacer(1, 4))
+                    cleaned = _neutralize_personal_tone(para.strip())
+                    flow.append(Paragraph(cleaned.replace("\n", "<br/>"), styles["AP_Body"]))
+                    flow.append(Spacer(1,4))
 
-        # ---- Appendices (optional) ----
+        # Appendix / wow plan (sanitise contents)
         if include_appendix and wow:
             flow.append(PageBreak())
             flow.append(Paragraph("APPENDIX — Transformation Plan", styles["AP_Heading"]))
-            flow.append(Spacer(1, 6))
+            flow.append(Spacer(1,6))
             if wow.get("plan"):
                 for line in wow.get("plan","").split("\n"):
                     if line.strip():
-                        flow.append(Paragraph(line.strip(), styles["AP_Body"]))
-            flow.append(Spacer(1, 6))
+                        flow.append(Paragraph(_neutralize_personal_tone(line.strip()), styles["AP_Body"]))
+            flow.append(Spacer(1,6))
             if wow.get("habit_stack"):
                 flow.append(Paragraph("Daily habit stack", styles["AP_Heading"]))
                 for line in wow.get("habit_stack","").split("\n"):
                     if line.strip():
-                        flow.append(Paragraph(line.strip(), styles["AP_Body"]))
-                flow.append(Spacer(1, 6))
+                        flow.append(Paragraph(_neutralize_personal_tone(line.strip()), styles["AP_Body"]))
+                flow.append(Spacer(1,6))
             if wow.get("checklist"):
                 flow.append(Paragraph("One-page checklist", styles["AP_Heading"]))
                 for line in wow.get("checklist","").split("\n"):
                     if line.strip():
-                        flow.append(Paragraph(line.strip(), styles["AP_Body"]))
-                flow.append(Spacer(1, 6))
+                        flow.append(Paragraph(_neutralize_personal_tone(line.strip()), styles["AP_Body"]))
+                flow.append(Spacer(1,6))
 
-        # ---- Doctor's highlighted note (if provided) ----
+        # Doctor highlighted note (sanitised)
         if doctor_note:
-            flow.append(Spacer(1, 8))
-            boxed = Table([[Paragraph(doctor_note, styles["AP_Body"])]], colWidths=[A4[0] - 36 * mm])
-            boxed.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (0,0), colors.HexColor("#FFF8B3")),
-                ("BOX", (0,0), (-1,-1), 0.75, colors.HexColor("#CCCC66")),
-                ("LEFTPADDING", (0,0), (-1,-1), 8),
-                ("RIGHTPADDING", (0,0), (-1,-1), 8),
-                ("TOPPADDING", (0,0), (-1,-1), 6),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-            ]))
-            flow.append(boxed)
-            flow.append(Spacer(1, 8))
+            flow.append(Spacer(1,8))
+            docnote_clean = _neutralize_personal_tone(doctor_note)
+            boxed = Table([[Paragraph(docnote_clean, styles["AP_Body"])]], colWidths=[A4[0] - 36 * mm])
+            boxed.setStyle(TableStyle([("BACKGROUND",(0,0),(0,0),colors.HexColor("#FFF8B3")),("BOX",(0,0),(-1,-1),0.75,colors.HexColor("#CCCC66")),("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)]))
+            flow.append(boxed); flow.append(Spacer(1,8))
 
-        # ---- Footer contact and build ----
-        flow.append(Spacer(1, 12))
+        # contact/footer
+        flow.append(Spacer(1,12))
         contact_par = f"{BRAND.get('clinic_name','')} — {BRAND.get('doctor','')} — {BRAND.get('phone','')}"
         flow.append(Paragraph(contact_par, styles["AP_Small"]))
-        flow.append(Paragraph(BRAND.get("address", ""), styles["AP_Small"]))
+        flow.append(Paragraph(BRAND.get("address",""), styles["AP_Small"]))
 
-        # footer / watermark drawing function
+        # watermark/footer draw function
         def _draw_page_footer_and_watermark(canvas_obj, doc_obj):
             try:
                 canvas_obj.saveState()
@@ -1375,10 +1373,10 @@ def branded_pdf_report(
                 try:
                     canvas_obj.setFillAlpha(opacity)
                 except Exception:
-                    canvas_obj.setFillColorRGB(0.7, 0.7, 0.7)
-                canvas_obj.translate(W / 2.0, H / 2.0)
+                    canvas_obj.setFillColorRGB(0.7,0.7,0.7)
+                canvas_obj.translate(W/2.0, H/2.0)
                 canvas_obj.rotate(30)
-                canvas_obj.drawCentredString(0, 0, wconf.get("watermark_text", BRAND.get("clinic_name","")))
+                canvas_obj.drawCentredString(0,0,wconf.get("watermark_text", BRAND.get("clinic_name","")))
                 canvas_obj.restoreState()
             except Exception:
                 logger.exception("Watermark draw failed")
@@ -1396,8 +1394,8 @@ def branded_pdf_report(
                         iw, ih = reader.getSize()
                         target_h = 10 * mm
                         scale = target_h / ih
-                        canvas_obj.drawImage(str(logo_path_local), x, footer_y - 2, width=iw * scale, height=ih * scale, mask="auto")
-                        x += (iw * scale) + 4
+                        canvas_obj.drawImage(str(logo_path_local), x, footer_y - 2, width=iw*scale, height=ih*scale, mask="auto")
+                        x += (iw*scale) + 4
                     except Exception:
                         logger.exception("Footer logo draw error")
                 try:
@@ -1441,7 +1439,6 @@ def branded_pdf_report(
         tb = traceback.format_exc()
         logger.exception("Platypus build failed: %s", tb)
         snippet = tb[:1200]
-        # fallback to canvas-based pdf with the error snippet shown in appendix
         return _fallback_canvas_pdf(
             patient,
             prakriti_pct,
@@ -1456,7 +1453,7 @@ def branded_pdf_report(
             wconf=wconf,
             wow=wow,
         )
-# ---- end replacement block ----
+# ----------------- end patch -----------------
 
 
 def _fallback_canvas_pdf(
