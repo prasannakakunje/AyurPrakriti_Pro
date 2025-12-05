@@ -1098,7 +1098,7 @@ def branded_pdf_report(
             leftMargin=18 * mm,
             rightMargin=18 * mm,
             topMargin=18 * mm,
-            bottomMargin=18 * mm,
+            bottomMargin=28 * mm,
         )
         styles = getSampleStyleSheet()
         base_font = "DejaVuSans" if DEJAVU_PATH else "Helvetica"
@@ -1164,15 +1164,15 @@ def branded_pdf_report(
         try:
             chart_cells = []
             if p1.exists():
-                chart_cells.append(RLImage(str(p1), width=85 * mm, height=45 * mm))
+                chart_cells.append(RLImage(str(p1), width=80 * mm, height=35 * mm))
             if p2.exists():
-                chart_cells.append(RLImage(str(p2), width=85 * mm, height=45 * mm))
+                chart_cells.append(RLImage(str(p2), width=80 * mm, height=35 * mm))
             if chart_cells:
-                flow.append(Table([chart_cells], colWidths=[90 * mm]*len(chart_cells)))
+                flow.append(Table([chart_cells], colWidths=[90*mm, 90*mm]*len(chart_cells)))
                 flow.append(Spacer(1, 6))
             if p3.exists():
-                flow.append(RLImage(str(p3), width=170 * mm, height=35 * mm)); flow.append(Spacer(1,6))
-            flow.append(Paragraph("Legend — Blue: Prakriti; Green: Vikriti; Purple: Psychometric", styles["AP_Small"]))
+                flow.append(RLImage(str(p3), width=160 * mm, height=30 * mm)); flow.append(Spacer(1,6))
+            flow.append(Paragraph("", styles["AP_Small"]))
             flow.append(Spacer(1,6))
         except Exception:
             logger.exception("Adding charts failed")
@@ -1367,7 +1367,7 @@ def branded_pdf_report(
             flow.append(boxed); flow.append(Spacer(1,8))
 
         # contact/footer
-        flow.append(Spacer(1,12))
+        flow.append(Spacer(1,18))
         contact_par = f"{BRAND.get('clinic_name','')} — {BRAND.get('doctor','')} — {BRAND.get('phone','')}"
         flow.append(Paragraph(contact_par, styles["AP_Small"]))
         flow.append(Paragraph(BRAND.get("address",""), styles["AP_Small"]))
@@ -1414,15 +1414,15 @@ def branded_pdf_report(
                     except Exception:
                         logger.exception("Footer logo draw error")
                 try:
-                    if DEJAVU_PATH:
-                        canvas_obj.setFont("DejaVuSans", 8)
-                    else:
-                        canvas_obj.setFont("Helvetica", 8)
-                except Exception:
                     canvas_obj.setFont("Helvetica", 8)
-                contact_line = f"{BRAND.get('clinic_name','')} — {BRAND.get('doctor','')} — {BRAND.get('phone','')} — {BRAND.get('email','')}"
-                canvas_obj.setFillColor(colors.HexColor("#444444"))
-                canvas_obj.drawString(18 * mm if x < 18 * mm + 2 else x, footer_y, contact_line)
+                except:
+                    pass
+                contact_line = f"{BRAND.get('clinic_name')} — {BRAND.get('doctor')} — {BRAND.get('phone')} — {BRAND.get('email')}"
+                # if too long, shorten (clinic + phone only)
+                if len(contact_line) > 90:
+                    contact_line = f"{BRAND.get('clinic_name')} — {BRAND.get('phone')}"
+                canvas_obj.drawString(18*mm if x < 18*mm+2 else x, footer_y, contact_line)
+
                 fmt = wconf.get("page_number_format", "Page {page}")
                 try:
                     page_num = canvas_obj.getPageNumber()
