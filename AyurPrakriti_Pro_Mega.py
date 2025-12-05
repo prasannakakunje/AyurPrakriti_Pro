@@ -320,9 +320,7 @@ CFG_PATH = APP_DIR / "config_rules.yaml"
 LOG_PATH = APP_DIR / "app_debug.log"
 
 # Try to copy logo from common container location if present
-if Path("/mnt/data/logo.png").exists():
-    try:
-        shutil.copy("/mnt/data/logo.png", APP_DIR / "logo.png")
+logo_path = APP_DIR / "logo.png"
     except:
         pass
 
