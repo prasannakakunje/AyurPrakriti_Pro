@@ -46,9 +46,7 @@ DB_PATH = APP_DIR / "ayurprakriti.db"
 CFG_PATH = APP_DIR / "config_rules.yaml"
 
 # Pre-copy a dev logo if present in container path
-if Path("/mnt/data/logo.png").exists():
     try:
-        shutil.copy("/mnt/data/logo.png", APP_DIR / "logo.png")
     except Exception:
         pass
 

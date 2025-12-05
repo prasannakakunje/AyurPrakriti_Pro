@@ -1,0 +1,41 @@
+# Query: mnt/data/logo
+# ContextLines: 1
+
+15 results - 7 files
+
+AyurPrakriti_Pro_Mega-old.py:
+  64  # Try to copy logo from common container location if present
+  65: logo_path = APP_DIR / "logo.png"
+  68      except:
+
+AyurPrakriti_Pro_Mega.py:
+  322  # Try to copy logo from common container location if present
+  323: logo_path = APP_DIR / "logo.png"
+  324      try:
+
+AyurPrakriti_Pro_Streamlit_App_full.py:
+  48  
+  49: # copy sample logo if present in /mnt/data/logo.png (for container testing)
+  50: logo_path = APP_DIR / "logo.png"
+  53      except Exception:
+
+AyurPrakriti_Pro_Streamlit_App_v1_shortreport.py:
+  47  # Pre-copy a dev logo if present in container path
+  48: logo_path = APP_DIR / "logo.png"
+  51      except Exception:
+
+AyurPrakriti_Pro_Streamlit_App_v2_longreport_appendix.py:
+  48  # Pre-copy a dev logo if present in container path
+  49: logo_path = APP_DIR / "logo.png"
+  52      except Exception:
+
+AyurPrakriti_Pro_Streamlit_App.py:
+  48  
+  49: # copy sample logo if present in /mnt/data/logo.png (for container testing)
+  50: logo_path = APP_DIR / "logo.png"
+  53      except Exception:
+
+AyurPrakriti_Pro_Wow_Report.py:
+  42  # try to copy a logo if provided in container path (useful for your environment)
+  43: logo_path = APP_DIR / "logo.png"
+  46      except Exception:

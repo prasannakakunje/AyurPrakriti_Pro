@@ -1,5 +1,6 @@
-# AyurPrakriti_Pro_Streamlit_App_full.py
-# Complete Streamlit app: Prakriti/Vikriti + Psychometrics + Plain-language recs + Branded PDF (Appendix) + Footer/Watermark config
+# AyurPrakriti_Pro_Streamlit_App.py
+# Full Streamlit app — AyurPrakriti Pro (Prakriti/Vikriti + Psychometrics)
+# Key fixes: DejaVu font, scaled logo, unique ReportLab styles, robust fallback PDF
 
 import streamlit as st
 import pandas as pd
@@ -23,7 +24,6 @@ from reportlab.platypus import (
     Table,
     TableStyle,
     PageBreak,
-    KeepTogether,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import A4
@@ -34,7 +34,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-# ---------------- Directories & Branding ------------------------------
+# ---------------- APP DIRECTORIES & BRANDING ------------------------------
 APP_DIR = Path.home() / ".ayurprakriti_app"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 FONTS_DIR = APP_DIR / "fonts"
@@ -43,10 +43,11 @@ TMP_DIR = APP_DIR / "tmp"
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "ayurprakriti.db"
 CFG_PATH = APP_DIR / "config_rules.yaml"
-REPORTS_DIR = APP_DIR / "reports"
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Pre-copy a dev logo if present in container path
+if Path("/mnt/data/logo.png").exists():
     try:
+        shutil.copy("/mnt/data/logo.png", APP_DIR / "logo.png")
     except Exception:
         pass
 
@@ -61,16 +62,7 @@ BRAND = {
     "accent_color": "#0F7A61",
 }
 
-WCONF = {
-    "watermark_text": BRAND["clinic_name"],
-    "watermark_opacity": 0.06,
-    "show_footer_logo": True,
-    "use_footer_signature": False,
-    "page_number_format": "Page {page}",
-    "footer_signature_file": str(APP_DIR / "signature.png"),
-}
-
-# ---------------- Logger ------------------------------
+# ---------------- LOGGER ---------------------------------------------------
 logger = logging.getLogger("ayurprakriti_app")
 if not logger.handlers:
     fh = logging.FileHandler(APP_DIR / "app_debug.log")
@@ -78,13 +70,13 @@ if not logger.handlers:
     logger.addHandler(fh)
 logger.setLevel(logging.INFO)
 
-# ---------------- Config & Defaults ------------------------------
+# ---------------- CONFIG & DEFAULTS ---------------------------------------
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 DEFAULT_CFG = {
     "meta": {
         "app_name": "AyurPrakriti Pro",
         "version": "1.0",
-        "author": "Auto-generated",
+        "author": "Auto-generated for Dr. Prasanna",
     },
     "questions": {
         "prakriti": [
@@ -210,7 +202,7 @@ if not CFG_PATH.exists():
 with open(CFG_PATH, "r", encoding="utf-8") as f:
     CONFIG = yaml.safe_load(f)
 
-# ---------------- Database ------------------------------
+# ---------------- DATABASE -------------------------------------------------
 conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
 cur = conn.cursor()
 cur.executescript(
@@ -242,6 +234,7 @@ CREATE TABLE IF NOT EXISTS assessments (
 """
 )
 conn.commit()
+
 cur.execute("SELECT COUNT(1) FROM users")
 if cur.fetchone()[0] == 0:
     ph = pwd_context.hash("admin123")
@@ -252,7 +245,7 @@ if cur.fetchone()[0] == 0:
     conn.commit()
 
 
-# ---------------- Helpers: scoring etc. ------------------------------
+# ---------------- HELPERS: DB & SCORING ------------------------------------
 def verify_user(username, password):
     cur.execute(
         "SELECT password_hash, display_name, role FROM users WHERE username=?",
@@ -464,7 +457,7 @@ def recommend_health(dosha_pct, vikriti_pct, cfg=CONFIG):
     return rec
 
 
-# ---------------- Charts & fonts ------------------------------
+# ---------------- CHART HELPER ---------------------------------------------
 def _make_bar_chart(series: dict, title: str, filename: Path):
     plt.close("all")
     keys = list(series.keys())
@@ -489,6 +482,7 @@ def _make_bar_chart(series: dict, title: str, filename: Path):
     plt.close(fig)
 
 
+# ---------------- FONT REGISTRATION ----------------------------------------
 DEJAVU_PATH = None
 _fonts = list(FONTS_DIR.glob("DejaVuSans*.ttf"))
 if _fonts:
@@ -498,6 +492,7 @@ if _fonts:
     else:
         DEJAVU_PATH = str(_fonts[0])
 else:
+    # typical system paths
     for cand in [
         r"C:\Windows\Fonts\DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -510,137 +505,51 @@ else:
 if DEJAVU_PATH:
     try:
         pdfmetrics.registerFont(TTFont("DejaVuSans", DEJAVU_PATH))
+        # try register bold if available
         bold_path = Path(DEJAVU_PATH).with_name("DejaVuSans-Bold.ttf")
         if bold_path.exists():
             pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", str(bold_path)))
         logger.info("Registered DejaVu for ReportLab: %s", DEJAVU_PATH)
     except Exception as e:
-        logger.exception("Failed to register DejaVu: %s", e)
+        logger.exception("Failed to register DejaVu for ReportLab: %s", e)
 else:
     logger.info("No DejaVu font found in %s", str(FONTS_DIR))
 
 
+# ---------------- IMAGE SCALING UTIL ---------------------------------------
 def scaled_rl_image(path: Path, max_w_mm: float = 36.0, max_h_mm: float = 36.0):
+    """
+    Return reportlab Image flowable scaled to max width/height (mm) preserving aspect ratio.
+    """
     if not Path(path).exists():
         raise FileNotFoundError(f"{path} not found")
     try:
         reader = ImageReader(str(path))
-        px_w, px_h = reader.getSize()
+        px_w, px_h = reader.getSize()  # pixel dims
+        # target points
         max_w_pts = max_w_mm * mm
         max_h_pts = max_h_mm * mm
+        # scale factor to fit within box
         if px_w <= 0 or px_h <= 0:
             scale = 1.0
         else:
+            # treat px as points baseline; compute scale
             scale = min(max_w_pts / px_w, max_h_pts / px_h, 1.0)
         img = RLImage(str(path))
         img.drawWidth = px_w * scale
         img.drawHeight = px_h * scale
         return img
     except Exception:
+        # fallback: basic image object without scaling
         img = RLImage(str(path))
+        # limit hard-coded small fallback
         img.drawWidth = max_w_mm * mm
         img.drawHeight = max_h_mm * mm
         return img
 
 
-# ---------------- Plain-language recs generator ------------------------------
-def generate_plain_recs(
-    patient, prakriti_pct, vikriti_pct, psych_pct, career_recs, rel_tips, health_recs
-):
-    dom = max(prakriti_pct, key=prakriti_pct.get)
-    current = max(vikriti_pct, key=vikriti_pct.get)
-    summary_short = (
-        f"{patient.get('name','The patient')} is mainly {dom} (creative and quick-thinking). "
-        f"Right now you may feel more {('slow and heavy' if current=='Kapha' else 'anxious or scattered' if current=='Vata' else 'hot and irritable')}. "
-        "Simple daily routines, warmth, gentle movement and two focused work blocks will help you feel calmer and more productive."
-    )
-    two_week_plan_lines = [
-        "2-week starter plan — simple, daily:",
-        "Day 1–3:",
-        "- Morning: warm water on waking. If comfortable, 5–10 minutes warm oil self-massage (Abhyanga).",
-        "- Breakfast: warm/cooked (porridge/kitchari). Avoid iced drinks first thing.",
-        "- Work: 1 × 60–90 minute focused session (timer ON).",
-        "- Movement: 20 minute brisk walk.",
-        "- Evening: light dinner by 8 pm; dim lights 20 minutes before bed.",
-        "",
-        "Day 4–7:",
-        "- Keep oil massage daily or every other day.",
-        "- Add a second 60–90 minute focused work session.",
-        "- Keep meal times regular; add a pinch of warming spice (ginger/black pepper).",
-        "",
-        "Week 2 (Day 8–14):",
-        "- Continue routines. Start a tiny micro-project (1–2 weeks) and time-box work.",
-        "- Track a simple morning energy score (1–5) each day and your sleep time.",
-        "",
-        "After 2 weeks: review sleep, energy, digestion. If improved — continue; otherwise seek brief clinical review.",
-    ]
-    two_week_plan = "\n".join(two_week_plan_lines)
-    checklist_lines = [
-        "Patient Action Plan — 1 page checklist",
-        "- Morning: warm water + 5–10 min warm oil rub (if possible).",
-        "- Breakfast: warm cooked meal (porridge, kitchari, oats).",
-        "- Work: 2 focused blocks (60–90 min each) with 20–30 min breaks.",
-        "- Movement: brisk walk or light yoga, 25–35 minutes daily.",
-        "- Dinner: light, finished by 8 pm. Avoid heavy/fried foods at night.",
-        "- Sleep: aim for bed by 10 pm; wake ~6–6:30 am (consistent wake time).",
-        "- Breathing: if anxious, do 3 minutes slow breathing (inhale 4s, exhale 6s).",
-        "- Weekly: complete 1 small creative task; 20-min planning on Sunday.",
-        "- Herbs: consult clinician before starting supplements/herbs.",
-        "- If severe symptoms (palpitations, persistent high fever, extreme insomnia) — contact clinic.",
-    ]
-    one_page_checklist = "\n".join(checklist_lines)
-    insight = (
-        f"You have a {dom}-style mind: quick, creative, and good at spotting new ideas. "
-        "You feel happiest finishing small creative pieces and getting quick feedback. "
-        "Protect two daily focused blocks, keep a grounding morning routine, and celebrate small wins."
-    )
-    return summary_short, two_week_plan, one_page_checklist, insight
-
-
-# ---------------- One-page Action Plan generator ------------------------------
-def onepage_actionplan_pdf(patient, one_page_checklist, summary_line, wconf=None):
-    buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    left = 20 * mm
-    y = A4[1] - 30 * mm
-    try:
-        if DEJAVU_PATH:
-            c.setFont("DejaVuSans", 14)
-        else:
-            c.setFont("Helvetica-Bold", 14)
-    except Exception:
-        c.setFont("Helvetica-Bold", 14)
-    c.drawString(left, y, BRAND["clinic_name"])
-    y -= 8 * mm
-    c.setFont("Helvetica", 9)
-    c.drawString(left, y, summary_line)
-    y -= 10 * mm
-    c.setFont("Helvetica", 10)
-    for line in one_page_checklist.split("\n"):
-        if not line.strip():
-            y -= 4 * mm
-            continue
-        if line.startswith("- "):
-            item = line[2:]
-            c.drawString(left + 4 * mm, y, "\u2022 " + item)
-        else:
-            c.drawString(left, y, line)
-        y -= 7 * mm
-        if y < 30 * mm:
-            c.showPage()
-            y = A4[1] - 30 * mm
-    # footer
-    c.setFont("Helvetica", 8)
-    c.drawString(
-        left, 12 * mm, f"{BRAND['clinic_name']} — {BRAND['phone']} — {BRAND['email']}"
-    )
-    c.save()
-    buf.seek(0)
-    return buf
-
-
-# ---------------- Text wrapper used by fallback ------------------------------
-def _wrap_text_simple(text, chars_per_line=95):
+# ---------------- PDF GENERATOR (Platypus + fallback) -----------------------
+def _wrap_text_simple(text, chars_per_line=90):
     words = str(text).split()
     lines = []
     cur = ""
@@ -655,7 +564,6 @@ def _wrap_text_simple(text, chars_per_line=95):
     return lines
 
 
-# ---------------- Fallback canvas PDF with watermark/footer ------------------------------
 def _fallback_canvas_pdf(
     patient,
     prakriti_pct,
@@ -665,14 +573,11 @@ def _fallback_canvas_pdf(
     rel_tips,
     health_recs,
     error_text=None,
-    include_appendix=False,
     report_id=None,
-    wconf=None,
-    plain_summary=None,
-    two_week_plan=None,
-    one_page_checklist=None,
-    insight_text=None,
 ):
+    """
+    Readable canvas fallback (BytesIO). Includes error snippet.
+    """
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     W, H = A4
@@ -685,317 +590,144 @@ def _fallback_canvas_pdf(
             c.setFont("Helvetica", 10)
     except Exception:
         c.setFont("Helvetica", 10)
-    if wconf is None:
-        wconf = WCONF
-
-    def _draw_watermark_and_footer(canvas_obj, page_num, total_pages=None):
-        try:
-            canvas_obj.saveState()
-            watermark_text = wconf.get(
-                "watermark_text", BRAND.get("clinic_name", "Kakunje Wellness")
-            )
-            try:
-                if DEJAVU_PATH:
-                    canvas_obj.setFont("DejaVuSans", 36)
-                else:
-                    canvas_obj.setFont("Helvetica-Bold", 36)
-            except Exception:
-                canvas_obj.setFont("Helvetica-Bold", 36)
-            opacity = float(wconf.get("watermark_opacity", 0.06))
-            try:
-                canvas_obj.setFillAlpha(opacity)
-            except Exception:
-                canvas_obj.setFillColorRGB(0.8, 0.8, 0.8)
-            canvas_obj.translate(W / 2.0, H / 2.0)
-            canvas_obj.rotate(30)
-            canvas_obj.drawCentredString(0, 0, watermark_text)
-            canvas_obj.restoreState()
-        except Exception:
-            logger.exception("Fallback watermark draw failed")
-        try:
-            canvas_obj.saveState()
-            footer_y = 18 * mm
-            canvas_obj.setStrokeColor(colors.lightgrey)
-            canvas_obj.setLineWidth(0.5)
-            canvas_obj.line(18 * mm, footer_y + 8, (A4[0] - 18 * mm), footer_y + 8)
-            logo_path_local = APP_DIR / "logo.png"
-            signature_path = (
-                Path(wconf.get("footer_signature_file", ""))
-                if wconf.get("footer_signature_file")
-                else None
-            )
-            x = 20 * mm
-            if wconf.get("show_footer_logo", True) and logo_path_local.exists():
-                try:
-                    reader = ImageReader(str(logo_path_local))
-                    iw, ih = reader.getSize()
-                    target_h = 10 * mm
-                    scale = target_h / ih
-                    canvas_obj.drawImage(
-                        str(logo_path_local),
-                        x,
-                        footer_y - 2,
-                        width=iw * scale,
-                        height=ih * scale,
-                        mask="auto",
-                    )
-                    x += (iw * scale) + 4
-                except Exception:
-                    logger.exception("Fallback footer logo draw failed")
-            elif (
-                wconf.get("use_footer_signature", False)
-                and signature_path
-                and signature_path.exists()
-            ):
-                try:
-                    reader = ImageReader(str(signature_path))
-                    iw, ih = reader.getSize()
-                    target_h = 10 * mm
-                    scale = target_h / ih
-                    canvas_obj.drawImage(
-                        str(signature_path),
-                        x,
-                        footer_y - 2,
-                        width=iw * scale,
-                        height=ih * scale,
-                        mask="auto",
-                    )
-                    x += (iw * scale) + 4
-                except Exception:
-                    logger.exception("Fallback footer signature draw failed")
-            try:
-                if DEJAVU_PATH:
-                    canvas_obj.setFont("DejaVuSans", 8)
-                else:
-                    canvas_obj.setFont("Helvetica", 8)
-            except Exception:
-                canvas_obj.setFont("Helvetica", 8)
-            contact_line = f"{BRAND.get('clinic_name')} — {BRAND.get('doctor')} — {BRAND.get('phone')} — {BRAND.get('email')}"
-            canvas_obj.setFillColor(colors.HexColor("#444444"))
-            canvas_obj.drawString(
-                18 * mm if x < 18 * mm + 2 else x, footer_y, contact_line
-            )
-            fmt = wconf.get("page_number_format", "Page {page}")
-            if "{total}" in fmt and total_pages is not None:
-                page_text = fmt.format(page=page_num, total=total_pages)
-            else:
-                page_text = fmt.format(page=page_num)
-            canvas_obj.drawRightString(A4[0] - 18 * mm, footer_y, page_text)
-            canvas_obj.restoreState()
-        except Exception:
-            logger.exception("Fallback footer draw failed")
-
     y = top
-    page_no = 1
-    try:
-        # header
-        logo_path = APP_DIR / "logo.png"
-        if not logo_path.exists() and Path("logo.png").exists():
-            logo_path = Path("logo.png")
-        if logo_path.exists():
-            try:
-                reader = ImageReader(str(logo_path))
-                px_w, px_h = reader.getSize()
-                scale = min((36 * mm) / px_w, (36 * mm) / px_h, 1.0)
-                c.drawImage(
-                    str(logo_path),
-                    left,
-                    y - (36 * mm),
-                    width=px_w * scale,
-                    height=px_h * scale,
-                    preserveAspectRatio=True,
-                    mask="auto",
-                )
-            except Exception:
-                pass
-        c.setFont("Helvetica-Bold", 13)
-        c.drawString(left, y - 6, BRAND.get("clinic_name", ""))
-        c.setFont("Helvetica", 9)
-        c.drawString(left, y - 20, BRAND.get("tagline", ""))
-        y -= 46 * mm
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(left, y, f"Patient: {patient.get('name','')}")
-        c.setFont("Helvetica", 9)
-        c.drawString(left + 220, y, f"Date: {datetime.now().strftime('%Y-%m-%d')}")
-        y -= 12
-        summary = "Fallback report: primary generator failed. Below are generated recommendations and data (simple layout)."
-        for line in _wrap_text_simple(summary, 95):
-            c.drawString(left, y, line)
-            y -= 10
-        y -= 6
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(left, y, "Prakriti:")
-        y -= 10
-        c.setFont("Helvetica", 9)
-        for k, v in prakriti_pct.items():
-            c.drawString(left + 6, y, f"{k}: {v} %")
-            y -= 10
-            if y < 70 * mm:
-                _draw_watermark_and_footer(c, page_no)
-                c.showPage()
-                page_no += 1
-                y = top
-        y -= 6
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(left, y, "Vikriti:")
-        y -= 10
-        c.setFont("Helvetica", 9)
-        for k, v in vikriti_pct.items():
-            c.drawString(left + 6, y, f"{k}: {v} %")
-            y -= 10
-            if y < 70 * mm:
-                _draw_watermark_and_footer(c, page_no)
-                c.showPage()
-                page_no += 1
-                y = top
-        y -= 6
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(left, y, "Top career suggestions:")
-        y -= 10
-        c.setFont("Helvetica", 9)
-        for cr in career_recs[:10]:
-            c.drawString(left + 6, y, f"- {cr.get('role')} (score {cr.get('score')})")
-            y -= 10
-            if y < 70 * mm:
-                _draw_watermark_and_footer(c, page_no)
-                c.showPage()
-                page_no += 1
-                y = top
-        y -= 6
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(left, y, "Relationship tips:")
-        y -= 10
-        c.setFont("Helvetica", 9)
-        for t in rel_tips:
-            c.drawString(left + 6, y, f"- {t[0]}: {t[1]}")
-            y -= 10
-            if y < 70 * mm:
-                _draw_watermark_and_footer(c, page_no)
-                c.showPage()
-                page_no += 1
-                y = top
-        y -= 6
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(left, y, "Health suggestions:")
-        y -= 10
-        c.setFont("Helvetica", 9)
-        for d in health_recs.get("diet", []):
-            c.drawString(left + 6, y, f"- Diet: {d}")
-            y -= 10
-            if y < 70 * mm:
-                _draw_watermark_and_footer(c, page_no)
-                c.showPage()
-                page_no += 1
-                y = top
-        for l in health_recs.get("lifestyle", []):
-            c.drawString(left + 6, y, f"- Lifestyle: {l}")
-            y -= 10
-            if y < 70 * mm:
-                _draw_watermark_and_footer(c, page_no)
-                c.showPage()
-                page_no += 1
-                y = top
-        for h in health_recs.get("herbs", []):
-            c.drawString(left + 6, y, f"- Herbs: {h}")
-            y -= 10
-            if y < 70 * mm:
-                _draw_watermark_and_footer(c, page_no)
-                c.showPage()
-                page_no += 1
-                y = top
 
-        # include plain-language appendix if requested
-        if include_appendix:
-            _draw_watermark_and_footer(c, page_no)
-            c.showPage()
-            page_no += 1
-            y = top
-            c.setFont("Helvetica-Bold", 12)
-            c.drawString(left, y, "APPENDIX — Practical Plain-language Plan")
-            y -= 14
-            c.setFont("Helvetica", 9)
-            if plain_summary:
-                for line in _wrap_text_simple(plain_summary, 95):
-                    c.drawString(left, y, line)
-                    y -= 10
-                    if y < 50 * mm:
-                        _draw_watermark_and_footer(c, page_no)
-                        c.showPage()
-                        page_no += 1
-                        y = top
-                y -= 6
-            if two_week_plan:
-                for line in two_week_plan.split("\n"):
-                    c.drawString(left, y, line)
-                    y -= 10
-                    if y < 50 * mm:
-                        _draw_watermark_and_footer(c, page_no)
-                        c.showPage()
-                        page_no += 1
-                        y = top
-                y -= 6
-            if one_page_checklist:
-                c.setFont("Helvetica-Bold", 11)
-                c.drawString(left, y, "One-page checklist")
-                y -= 10
-                c.setFont("Helvetica", 9)
-                for line in one_page_checklist.split("\n"):
-                    c.drawString(left, y, line)
-                    y -= 10
-                    if y < 40 * mm:
-                        _draw_watermark_and_footer(c, page_no)
-                        c.showPage()
-                        page_no += 1
-                        y = top
-                y -= 6
-            if insight_text:
-                c.setFont("Helvetica-Bold", 11)
-                c.drawString(left, y, "Personality insight")
-                y -= 10
-                c.setFont("Helvetica", 9)
-                for line in _wrap_text_simple(insight_text, 95):
-                    c.drawString(left, y, line)
-                    y -= 10
-                    if y < 40 * mm:
-                        _draw_watermark_and_footer(c, page_no)
-                        c.showPage()
-                        page_no += 1
-                        y = top
-
-        if error_text:
-            _draw_watermark_and_footer(c, page_no)
-            c.showPage()
-            page_no += 1
-            y = top
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(left, y, "Report engine error (short):")
-            y -= 12
-            c.setFont("Helvetica", 7)
-            for line in _wrap_text_simple(error_text, 120):
-                c.drawString(left, y, line)
-                y -= 8
-                if y < 30 * mm:
-                    _draw_watermark_and_footer(c, page_no)
-                    c.showPage()
-                    page_no += 1
-                    y = top
-
-        _draw_watermark_and_footer(c, page_no)
-        c.save()
-        buf.seek(0)
-        return buf
-    except Exception:
+    logo_path = APP_DIR / "logo.png"
+    if not logo_path.exists() and Path("logo.png").exists():
+        logo_path = Path("logo.png")
+    if logo_path.exists():
         try:
-            _draw_watermark_and_footer(c, page_no)
-            c.save()
-            buf.seek(0)
-            return buf
+            reader = ImageReader(str(logo_path))
+            px_w, px_h = reader.getSize()
+            scale = min((36 * mm) / px_w, (36 * mm) / px_h, 1.0)
+            c.drawImage(
+                str(logo_path),
+                left,
+                y - (36 * mm),
+                width=px_w * scale,
+                height=px_h * scale,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
         except Exception:
-            logger.exception("Fallback canvas PDF failed")
-            raise
+            pass
+
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(left + 140, y - 6, BRAND.get("clinic_name", ""))
+    c.setFont("Helvetica", 9)
+    c.drawString(left + 140, y - 20, BRAND.get("tagline", ""))
+    y -= 46 * mm
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(left, y, f"Patient: {patient.get('name','')}")
+    c.setFont("Helvetica", 9)
+    c.drawString(left + 220, y, f"Date: {datetime.now().strftime('%Y-%m-%d')}")
+    y -= 12
+
+    summary = "Fallback report: primary generator failed. Below are the generated recommendations and data (layout simplified)."
+    for line in _wrap_text_simple(summary, 95):
+        c.drawString(left, y, line)
+        y -= 10
+
+    y -= 6
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(left, y, "Prakriti:")
+    y -= 10
+    c.setFont("Helvetica", 9)
+    for k, v in prakriti_pct.items():
+        c.drawString(left + 6, y, f"{k}: {v} %")
+        y -= 10
+        if y < 70 * mm:
+            c.showPage()
+            y = top
+
+    y -= 6
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(left, y, "Vikriti:")
+    y -= 10
+    c.setFont("Helvetica", 9)
+    for k, v in vikriti_pct.items():
+        c.drawString(left + 6, y, f"{k}: {v} %")
+        y -= 10
+        if y < 70 * mm:
+            c.showPage()
+            y = top
+
+    y -= 6
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(left, y, "Top career suggestions:")
+    y -= 10
+    c.setFont("Helvetica", 9)
+    for cr in career_recs[:10]:
+        c.drawString(left + 6, y, f"- {cr.get('role')} (score {cr.get('score')})")
+        y -= 10
+        if y < 70 * mm:
+            c.showPage()
+            y = top
+
+    y -= 6
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(left, y, "Relationship tips:")
+    y -= 10
+    c.setFont("Helvetica", 9)
+    for t in rel_tips:
+        c.drawString(left + 6, y, f"- {t[0]}: {t[1]}")
+        y -= 10
+        if y < 70 * mm:
+            c.showPage()
+            y = top
+
+    y -= 6
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(left, y, "Health suggestions:")
+    y -= 10
+    c.setFont("Helvetica", 9)
+    for d in health_recs.get("diet", []):
+        c.drawString(left + 6, y, f"- Diet: {d}")
+        y -= 10
+        if y < 70 * mm:
+            c.showPage()
+            y = top
+    for l in health_recs.get("lifestyle", []):
+        c.drawString(left + 6, y, f"- Lifestyle: {l}")
+        y -= 10
+        if y < 70 * mm:
+            c.showPage()
+            y = top
+    for h in health_recs.get("herbs", []):
+        c.drawString(left + 6, y, f"- Herbs: {h}")
+        y -= 10
+        if y < 70 * mm:
+            c.showPage()
+            y = top
+
+    if error_text:
+        y -= 8
+        if y < 80 * mm:
+            c.showPage()
+            y = top
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(left, y, "Report engine error (short):")
+        y -= 12
+        c.setFont("Helvetica", 7)
+        for line in _wrap_text_simple(error_text, 120):
+            c.drawString(left, y, line)
+            y -= 8
+            if y < 30 * mm:
+                c.showPage()
+                y = top
+
+    c.setFont("Helvetica", 8)
+    c.drawString(
+        left,
+        18 * mm,
+        f"{BRAND.get('clinic_name')} — {BRAND.get('phone')} — {BRAND.get('email')}",
+    )
+    c.save()
+    buf.seek(0)
+    return buf
 
 
-# ---------------- Branded PDF (Platypus) with plain-language appendix ------------------------------
 def branded_pdf_report(
     patient,
     prakriti_pct,
@@ -1004,21 +736,14 @@ def branded_pdf_report(
     career_recs,
     rel_tips,
     health_recs,
-    include_appendix=False,
     report_id=None,
-    wconf=None,
-    plain_summary=None,
-    two_week_plan=None,
-    one_page_checklist=None,
-    insight_text=None,
 ):
-    logger.info(
-        "Start branded_pdf_report for %s (appendix=%s)",
-        patient.get("name", "N/A"),
-        include_appendix,
-    )
-    if wconf is None:
-        wconf = WCONF
+    """
+    Main branded PDF builder. Returns BytesIO.
+    Tries Platypus flow; on failure returns canvas-based fallback BytesIO.
+    """
+    logger.info("Start branded_pdf_report for %s", patient.get("name", "N/A"))
+    # create chart images
     p1 = TMP_DIR / f"prakriti_{int(datetime.now().timestamp())}.png"
     p2 = TMP_DIR / f"vikriti_{int(datetime.now().timestamp())}.png"
     p3 = TMP_DIR / f"psych_{int(datetime.now().timestamp())}.png"
@@ -1028,6 +753,7 @@ def branded_pdf_report(
         _make_bar_chart(psych_pct, "Psychometric (approx %)", p3)
     except Exception:
         logger.exception("Chart generation failed")
+
     try:
         buf = BytesIO()
         doc = SimpleDocTemplate(
@@ -1040,7 +766,13 @@ def branded_pdf_report(
         )
         styles = getSampleStyleSheet()
         base_font = "DejaVuSans" if DEJAVU_PATH else "Helvetica"
-        accent = colors.HexColor(BRAND["accent_color"])
+        accent = (
+            colors.HexColor(BRAND["accent_color"])
+            if BRAND.get("accent_color")
+            else colors.HexColor("#0F7A61")
+        )
+
+        # add unique styles if not present
         if "AP_Title" not in styles:
             styles.add(
                 ParagraphStyle(
@@ -1092,7 +824,10 @@ def branded_pdf_report(
                     bulletIndent=6,
                 )
             )
+
         flow = []
+
+        # Header: logo + clinic info
         logo_path = APP_DIR / "logo.png"
         if not logo_path.exists() and Path("logo.png").exists():
             logo_path = Path("logo.png")
@@ -1114,6 +849,7 @@ def branded_pdf_report(
                 )
                 flow.append(header_t)
             except Exception:
+                logger.exception("Logo embedding failed in Platypus")
                 flow.append(
                     Paragraph(
                         f"<b>{BRAND['clinic_name']}</b><br/>{BRAND['tagline']}",
@@ -1127,7 +863,10 @@ def branded_pdf_report(
                     styles["AP_Title"],
                 )
             )
+
         flow.append(Spacer(1, 6))
+
+        # Patient details table
         patient_lines = [
             ["Patient", patient.get("name", "")],
             ["Age", str(patient.get("age", ""))],
@@ -1151,6 +890,8 @@ def branded_pdf_report(
         )
         flow.append(t)
         flow.append(Spacer(1, 8))
+
+        # Executive summary
         flow.append(Paragraph("Executive summary", styles["AP_Heading"]))
         summary_text = (
             "This report summarises constitutional profile (Prakriti), current imbalances (Vikriti) and "
@@ -1159,6 +900,8 @@ def branded_pdf_report(
         )
         flow.append(Paragraph(summary_text, styles["AP_Body"]))
         flow.append(Spacer(1, 8))
+
+        # Charts (two across, one below)
         try:
             cells = []
             if p1.exists() and p2.exists():
@@ -1179,7 +922,9 @@ def branded_pdf_report(
                 flow.append(img3)
                 flow.append(Spacer(1, 6))
         except Exception:
-            logger.exception("Failed to add chart images")
+            logger.exception("Failed to add chart images to the Platypus flow")
+
+        # Prakriti & Vikriti numeric tables
         flow.append(
             Paragraph("Prakriti — percentage distribution", styles["AP_Heading"])
         )
@@ -1195,6 +940,7 @@ def branded_pdf_report(
         )
         flow.append(t)
         flow.append(Spacer(1, 6))
+
         flow.append(
             Paragraph("Vikriti — percentage distribution (today)", styles["AP_Heading"])
         )
@@ -1210,6 +956,8 @@ def branded_pdf_report(
         )
         flow.append(t)
         flow.append(Spacer(1, 8))
+
+        # Recommendations block
         flow.append(
             Paragraph("Recommendations (practical & prioritized)", styles["AP_Heading"])
         )
@@ -1225,10 +973,12 @@ def branded_pdf_report(
                 )
             )
         flow.append(Spacer(1, 6))
+
         flow.append(Paragraph("Relationship & communication tips:", styles["AP_Body"]))
         for title, reason in rel_tips:
             flow.append(Paragraph(f"• <b>{title}</b> — {reason}", styles["AP_Bullet"]))
         flow.append(Spacer(1, 6))
+
         flow.append(
             Paragraph("Health, Diet & Lifestyle (practical):", styles["AP_Body"])
         )
@@ -1245,165 +995,29 @@ def branded_pdf_report(
             for h in health_recs.get("herbs", []):
                 flow.append(Paragraph(f"• {h}", styles["AP_Bullet"]))
         flow.append(Spacer(1, 8))
+
+        # Footer contact
         flow.append(Spacer(1, 12))
         contact_par = f"{BRAND.get('clinic_name')} — {BRAND.get('doctor')} — {BRAND.get('phone')} — {BRAND.get('email')}"
         flow.append(Paragraph(contact_par, styles["AP_Small"]))
         flow.append(Paragraph(BRAND.get("address", ""), styles["AP_Small"]))
 
-        # Include plain-language appendix if requested
-        if include_appendix:
-            flow.append(PageBreak())
-            flow.append(
-                Paragraph(
-                    "APPENDIX — Practical Plain-language Plan", styles["AP_Heading"]
-                )
-            )
-            flow.append(Spacer(1, 6))
-            if plain_summary:
-                flow.append(Paragraph("<b>Short summary</b>", styles["AP_Body"]))
-                flow.append(Paragraph(plain_summary, styles["AP_Body"]))
-                flow.append(Spacer(1, 6))
-            if two_week_plan:
-                flow.append(Paragraph("<b>2-week starter plan</b>", styles["AP_Body"]))
-                for line in two_week_plan.split("\n"):
-                    flow.append(Paragraph(line.strip(), styles["AP_Body"]))
-                flow.append(Spacer(1, 6))
-            if one_page_checklist:
-                flow.append(Paragraph("<b>One-page checklist</b>", styles["AP_Body"]))
-                for line in one_page_checklist.split("\n"):
-                    flow.append(Paragraph(line.strip(), styles["AP_Body"]))
-                flow.append(Spacer(1, 6))
-            if insight_text:
-                flow.append(
-                    Paragraph(
-                        "<b>Personality insight (plain language)</b>", styles["AP_Body"]
-                    )
-                )
-                flow.append(Paragraph(insight_text, styles["AP_Body"]))
-
-        def _draw_page_footer_and_watermark(canvas_obj, doc_obj):
-            try:
-                canvas_obj.saveState()
-                W, H = A4
-                watermark_text = wconf.get(
-                    "watermark_text", BRAND.get("clinic_name", "Kakunje Wellness")
-                )
-                try:
-                    if DEJAVU_PATH:
-                        canvas_obj.setFont("DejaVuSans", 40)
-                    else:
-                        canvas_obj.setFont("Helvetica-Bold", 40)
-                except Exception:
-                    canvas_obj.setFont("Helvetica-Bold", 40)
-                opacity = float(wconf.get("watermark_opacity", 0.06))
-                try:
-                    canvas_obj.setFillAlpha(opacity)
-                except Exception:
-                    canvas_obj.setFillColorRGB(0.6, 0.6, 0.6)
-                canvas_obj.translate(W / 2.0, H / 2.0)
-                canvas_obj.rotate(30)
-                canvas_obj.drawCentredString(0, 0, watermark_text)
-                canvas_obj.restoreState()
-            except Exception:
-                logger.exception("Watermark drawing failed")
-            try:
-                canvas_obj.saveState()
-                footer_y = 18 * mm
-                canvas_obj.setStrokeColor(colors.lightgrey)
-                canvas_obj.setLineWidth(0.5)
-                canvas_obj.line(18 * mm, footer_y + 8, (A4[0] - 18 * mm), footer_y + 8)
-                logo_path_local = APP_DIR / "logo.png"
-                signature_path = (
-                    Path(wconf.get("footer_signature_file", ""))
-                    if wconf.get("footer_signature_file")
-                    else None
-                )
-                x = 20 * mm
-                if wconf.get("show_footer_logo", True) and logo_path_local.exists():
-                    try:
-                        reader = ImageReader(str(logo_path_local))
-                        iw, ih = reader.getSize()
-                        target_h = 10 * mm
-                        scale = target_h / ih
-                        canvas_obj.drawImage(
-                            str(logo_path_local),
-                            x,
-                            footer_y - 2,
-                            width=iw * scale,
-                            height=ih * scale,
-                            mask="auto",
-                        )
-                        x += (iw * scale) + 4
-                    except Exception:
-                        logger.exception("Footer logo draw failed")
-                elif (
-                    wconf.get("use_footer_signature", False)
-                    and signature_path
-                    and signature_path.exists()
-                ):
-                    try:
-                        reader = ImageReader(str(signature_path))
-                        iw, ih = reader.getSize()
-                        target_h = 10 * mm
-                        scale = target_h / ih
-                        canvas_obj.drawImage(
-                            str(signature_path),
-                            x,
-                            footer_y - 2,
-                            width=iw * scale,
-                            height=ih * scale,
-                            mask="auto",
-                        )
-                        x += (iw * scale) + 4
-                    except Exception:
-                        logger.exception("Footer signature draw failed")
-                try:
-                    if DEJAVU_PATH:
-                        canvas_obj.setFont("DejaVuSans", 8)
-                    else:
-                        canvas_obj.setFont("Helvetica", 8)
-                except Exception:
-                    canvas_obj.setFont("Helvetica", 8)
-                contact_line = f"{BRAND.get('clinic_name')} — {BRAND.get('doctor')} — {BRAND.get('phone')} — {BRAND.get('email')}"
-                canvas_obj.setFillColor(colors.HexColor("#444444"))
-                canvas_obj.drawString(
-                    18 * mm if x < 18 * mm + 2 else x, footer_y, contact_line
-                )
-                try:
-                    page_num = canvas_obj.getPageNumber()
-                except Exception:
-                    page_num = doc_obj.page
-                fmt = wconf.get("page_number_format", "Page {page}")
-                if "{total}" in fmt:
-                    page_text = fmt.replace("{page}", "%d").replace("{total}", "%d") % (
-                        page_num,
-                        page_num,
-                    )
-                else:
-                    page_text = fmt.format(page=page_num)
-                canvas_obj.drawRightString(A4[0] - 18 * mm, footer_y, page_text)
-                canvas_obj.restoreState()
-            except Exception:
-                logger.exception("Footer drawing failed")
-
-        doc.build(
-            flow,
-            onFirstPage=_draw_page_footer_and_watermark,
-            onLaterPages=_draw_page_footer_and_watermark,
-        )
+        doc.build(flow)
         buf.seek(0)
+
+        # cleanup charts
         for p in (p1, p2, p3):
             try:
                 if p.exists():
                     p.unlink()
             except Exception:
                 pass
+
         logger.info(
-            "Platypus PDF built successfully for %s (appendix=%s)",
-            patient.get("name", "N/A"),
-            include_appendix,
+            "Platypus PDF built successfully for %s", patient.get("name", "N/A")
         )
         return buf
+
     except Exception:
         tb = traceback.format_exc()
         logger.exception("Platypus build failed: %s", tb)
@@ -1417,17 +1031,11 @@ def branded_pdf_report(
             rel_tips,
             health_recs,
             error_text=snippet,
-            include_appendix=include_appendix,
             report_id=report_id,
-            wconf=wconf,
-            plain_summary=plain_summary,
-            two_week_plan=two_week_plan,
-            one_page_checklist=one_page_checklist,
-            insight_text=insight_text,
         )
 
 
-# ---------------- DOCX ------------------------------
+# ---------------- DOCX REPORT (simple) -------------------------------------
 def docx_report(
     patient, prakriti_pct, vikriti_pct, psych_pct, career_recs, rel_tips, health_recs
 ):
@@ -1463,12 +1071,13 @@ def docx_report(
     return bio
 
 
-# ---------------- Streamlit UI ------------------------------
+# ---------------- STREAMLIT UI ---------------------------------------------
 st.set_page_config(page_title=CONFIG["meta"]["app_name"], layout="wide")
 st.markdown(
     "<style>section[data-testid='stSidebar'] {background-color: #f7f7fa}</style>",
     unsafe_allow_html=True,
 )
+
 col1, col2 = st.columns([6, 4])
 with col1:
     st.title(CONFIG["meta"]["app_name"])
@@ -1563,9 +1172,6 @@ with tabs[1]:
                 psy_answers[q["id"]] = st.slider(
                     q["text"], 1, 7, 4, key=f"psy_{q['id']}"
                 )
-        show_long_preview = st.checkbox(
-            "Show long recommendations on screen (preview)", value=False
-        )
         if st.button("Compute & Save Assessment"):
             prak_pct = score_dosha_from_answers(pr_answers, pr_qs)
             vik_pct = score_dosha_from_answers(vk_answers, vk_qs)
@@ -1584,33 +1190,10 @@ with tabs[1]:
                 "career_recs": career,
                 "relationship_tips": rel,
                 "health_recs": health,
-                "created_at": datetime.now().isoformat(),
             }
             aid = save_assessment(patient_row["id"], st.session_state.user, payload)
-            # generate plain-language recs and attach
-            summary_short, two_week_plan, one_page_checklist, insight = (
-                generate_plain_recs(
-                    patient_row, prak_pct, vik_pct, psych_pct, career, rel, health
-                )
-            )
-            payload["plain_summary"] = summary_short
-            payload["two_week_plan"] = two_week_plan
-            payload["one_page_checklist"] = one_page_checklist
-            payload["insight"] = insight
-            st.session_state["last_assessment"] = payload
-            st.session_state["last_aid"] = aid
             st.success(f"Assessment saved (id: {aid})")
-
-        if "last_assessment" in st.session_state:
-            payload = st.session_state["last_assessment"]
-            prak_pct = payload["prakriti_pct"]
-            vik_pct = payload["vikriti_pct"]
-            psych_pct = payload["psych_pct"]
-            career = payload["career_recs"]
-            rel = payload["relationship_tips"]
-            health = payload["health_recs"]
-            aid = st.session_state.get("last_aid", None)
-            st.markdown("### Results snapshot (most recent)")
+            st.markdown("### Results snapshot")
             c1, c2, c3 = st.columns(3)
             c1.metric("Dominant Prakriti", max(prak_pct, key=prak_pct.get))
             c2.metric("Current Aggravation", max(vik_pct, key=vik_pct.get))
@@ -1633,104 +1216,42 @@ with tabs[1]:
             st.write("Diet: " + ", ".join(health["diet"]))
             st.write("Lifestyle: " + ", ".join(health["lifestyle"]))
             st.write("Herbs: " + ", ".join(health["herbs"]))
-            st.markdown("---")
-            include_appendix = st.checkbox(
-                "Include detailed Appendix in Branded PDF (long version)",
-                value=False,
-                key="include_appendix_pdf",
+
+            # PDF (BytesIO) and DOCX
+            pdf_b = branded_pdf_report(
+                patient_row,
+                prak_pct,
+                vik_pct,
+                psych_pct,
+                career,
+                rel,
+                health,
+                report_id=aid,
             )
-            effective_wconf = WCONF.copy()
-            if "pdf_wconf" in st.session_state:
-                effective_wconf.update(st.session_state["pdf_wconf"])
-            if st.button("Prepare Branded PDF (ready to download)"):
-                pdf_b = branded_pdf_report(
-                    payload["patient"],
-                    prak_pct,
-                    vik_pct,
-                    psych_pct,
-                    career,
-                    rel,
-                    health,
-                    include_appendix=include_appendix,
-                    report_id=aid,
-                    wconf=effective_wconf,
-                    plain_summary=payload.get("plain_summary"),
-                    two_week_plan=payload.get("two_week_plan"),
-                    one_page_checklist=payload.get("one_page_checklist"),
-                    insight_text=payload.get("insight"),
-                )
-                st.session_state["last_pdf"] = pdf_b.getvalue()
-                st.success("PDF prepared — use the download button below.")
-            if "last_pdf" in st.session_state:
-                st.download_button(
-                    "Download Branded PDF (professional)",
-                    data=BytesIO(st.session_state["last_pdf"]),
-                    file_name=f"Branded_Report_{payload['patient']['name']}_{aid}.pdf",
-                    mime="application/pdf",
-                )
-            else:
-                pdf_b = branded_pdf_report(
-                    payload["patient"],
-                    prak_pct,
-                    vik_pct,
-                    psych_pct,
-                    career,
-                    rel,
-                    health,
-                    include_appendix=include_appendix,
-                    report_id=aid,
-                    wconf=effective_wconf,
-                    plain_summary=payload.get("plain_summary"),
-                    two_week_plan=payload.get("two_week_plan"),
-                    one_page_checklist=payload.get("one_page_checklist"),
-                    insight_text=payload.get("insight"),
-                )
-                st.download_button(
-                    "Download Branded PDF (professional)",
-                    pdf_b,
-                    file_name=f"Branded_Report_{payload['patient']['name']}_{aid}.pdf",
-                    mime="application/pdf",
-                )
+            st.download_button(
+                "Download Branded PDF (professional)",
+                pdf_b,
+                file_name=f"Branded_Report_{patient_row['name']}_{aid}.pdf",
+                mime="application/pdf",
+            )
             docx_b = docx_report(
-                payload["patient"], prak_pct, vik_pct, psych_pct, career, rel, health
+                patient_row, prak_pct, vik_pct, psych_pct, career, rel, health
             )
             st.download_button(
                 "Download DOCX report",
                 docx_b,
-                file_name=f"Report_{payload['patient']['name']}_{aid}.docx",
+                file_name=f"Report_{patient_row['name']}_{aid}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
-            action_pdf = onepage_actionplan_pdf(
-                payload["patient"],
-                payload.get("one_page_checklist", ""),
-                payload.get("plain_summary", ""),
-            )
-            st.download_button(
-                "Download 1-page Action Plan (PDF)",
-                action_pdf,
-                file_name=f"ActionPlan_{payload['patient']['name']}.pdf",
-                mime="application/pdf",
-            )
+
             follow_date = (datetime.now() + timedelta(days=7)).strftime("%Y%m%dT%H%M00")
-            ics = f"BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M00')}\nDTSTART:{follow_date}\nDTEND:{follow_date}\nSUMMARY:Follow-up for {payload['patient']['name']} (AyurPrakriti)\nDESCRIPTION:Review outcomes and adherence to recommendations.\nEND:VEVENT\nEND:VCALENDAR"
+            ics = f"BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M00')}\nDTSTART:{follow_date}\nDTEND:{follow_date}\nSUMMARY:Follow-up for {patient_row['name']} (AyurPrakriti)\nDESCRIPTION:Review outcomes and adherence to recommendations.\nEND:VEVENT\nEND:VCALENDAR"
             st.download_button(
                 "Download follow-up (.ics)",
                 ics.encode("utf-8"),
-                file_name=f"followup_{payload['patient']['name']}_{aid}.ics',",
+                file_name=f"followup_{patient_row['name']}_{aid}.ics",
                 mime="text/calendar",
             )
-            if show_long_preview:
-                st.markdown("---")
-                st.header("Plain-language practical plan (preview)")
-                st.write(payload.get("plain_summary", ""))
-                with st.expander("2-week starter plan (plain language)"):
-                    st.text(payload.get("two_week_plan", ""))
-                with st.expander("One-page checklist"):
-                    st.text(payload.get("one_page_checklist", ""))
-                with st.expander("Deeper personality insight (plain language)"):
-                    st.write(payload.get("insight", ""))
-        else:
-            st.info("Compute an assessment to see results and downloads.")
 
 # Tab 3: Clinician Dashboard
 with tabs[2]:
@@ -1806,50 +1327,6 @@ with tabs[3]:
         if st.form_submit_button("Save branding"):
             st.success("Branding updated")
     st.markdown("---")
-    st.subheader("PDF watermark & footer settings")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        wm_text = st.text_input(
-            "Watermark text", value=WCONF.get("watermark_text", BRAND["clinic_name"])
-        )
-        wm_op = st.slider(
-            "Watermark opacity (0.01 - 0.2)",
-            min_value=0.01,
-            max_value=0.2,
-            value=float(WCONF.get("watermark_opacity", 0.06)),
-            step=0.01,
-        )
-        show_logo = st.checkbox(
-            "Show footer logo", value=WCONF.get("show_footer_logo", True)
-        )
-    with col_b:
-        use_sig = st.checkbox(
-            "Use footer signature image instead of logo",
-            value=WCONF.get("use_footer_signature", False),
-        )
-        page_fmt = st.selectbox(
-            "Page number format",
-            options=["Page {page}", "Page {page} of {total}"],
-            index=0,
-        )
-        signature_file = st.file_uploader(
-            "Upload footer signature (PNG)", type=["png", "jpg", "jpeg"]
-        )
-    if signature_file is not None:
-        sig_save = APP_DIR / "signature.png"
-        with open(sig_save, "wb") as f:
-            f.write(signature_file.getbuffer())
-        st.success("Signature uploaded and saved")
-        WCONF["footer_signature_file"] = str(sig_save)
-    if st.button("Save PDF/Watermark settings"):
-        WCONF["watermark_text"] = wm_text
-        WCONF["watermark_opacity"] = float(wm_op)
-        WCONF["show_footer_logo"] = bool(show_logo)
-        WCONF["use_footer_signature"] = bool(use_sig)
-        WCONF["page_number_format"] = page_fmt
-        st.session_state["pdf_wconf"] = WCONF.copy()
-        st.success("PDF watermark & footer settings saved")
-    st.markdown("---")
     st.subheader("Config file (editable YAML)")
     cfg_text = yaml.safe_dump(CONFIG, sort_keys=False)
     new_cfg_text = st.text_area("Edit YAML config", cfg_text, height=300)
@@ -1874,7 +1351,7 @@ with tabs[3]:
     )
     st.markdown("---")
     st.caption(
-        "Next steps: migrate DB to Postgres for multi-user, add OAuth, consent & audit logs, host behind HTTPS."
+        "Next steps: migrate DB to Postgres for multi-user, add OAuth, add consent & audit logs, host behind HTTPS."
     )
 
-# End of file
+# ---------------- END OF FILE ------------------------------------------------

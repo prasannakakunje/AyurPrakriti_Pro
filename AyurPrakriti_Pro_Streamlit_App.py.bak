@@ -46,7 +46,10 @@ CFG_PATH = APP_DIR / "config_rules.yaml"
 REPORTS_DIR = APP_DIR / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# copy sample logo if present in /mnt/data/logo.png (for container testing)
+if Path("/mnt/data/logo.png").exists():
     try:
+        shutil.copy("/mnt/data/logo.png", APP_DIR / "logo.png")
     except Exception:
         pass
 

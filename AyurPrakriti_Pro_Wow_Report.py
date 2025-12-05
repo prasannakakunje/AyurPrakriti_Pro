@@ -40,9 +40,7 @@ REPORTS_DIR = APP_DIR / 'reports'
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # try to copy a logo if provided in container path (useful for your environment)
-if Path('/mnt/data/logo.png').exists():
-    try:
-        shutil.copy('/mnt/data/logo.png', APP_DIR / 'logo.png')
+logo_path = APP_DIR / "logo.png"
     except Exception:
         pass
 
