@@ -62,9 +62,6 @@ CFG_PATH = APP_DIR / "config_rules.yaml"
 LOG_PATH = APP_DIR / "app_debug.log"
 
 # Try to copy logo from common container location if present
-    try:
-    except:
-        pass
 
 # Branding default (will be editable in UI)
 BRAND = {
