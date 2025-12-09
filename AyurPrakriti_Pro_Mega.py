@@ -1,57 +1,101 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-AyurPrakriti_Pro_Mega_fixed.py
-Corrected full file focused on report generation and PDF builder.
-Includes robust logo handling, legend fallback, chart generation, and
-cleaned career rationale logic.
-"""
+# AyurPrakriti_Pro_Mega.py
+# FULL merged single-file Streamlit app
+# - Admin system: YES
+# - Full PDF fallback engine: YES
+# - Large questionnaire set: YES
+# - Full settings system: YES
+#
+# Save as AyurPrakriti_Pro_Mega.py and run:
+# pip install streamlit reportlab matplotlib pandas python-docx passlib pyyaml pillow
+# streamlit run AyurPrakriti_Pro_Mega.py
+#
+# NOTE: This file is long (split into 4 parts). Paste the 4 parts together in order.
 
-import os
-import sys
-import json
-import yaml
-import logging
-import traceback
-import shutil
-import math
-import re
-from io import BytesIO
-from datetime import datetime
+import os, sys, json, shutil, logging, traceback
 from pathlib import Path
+from datetime import datetime, timedelta
+from io import BytesIO
+import yaml
+import sqlite3
+import base64
+import re
 
-# reportlab
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+# UI / Data
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from passlib.context import CryptContext
+from docx import Document
+from PIL import Image
+
+# ReportLab
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
     Spacer,
+    Image as RLImage,
     Table,
     TableStyle,
-    Image as RLImage,
     PageBreak,
+    KeepTogether,
 )
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas
+from reportlab.platypus import KeepTogether
+from PIL import Image as PILImage
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
 
-# plotting
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
+# ---------- TEXT SANITIZER ----------
 
-# logging
-logger = logging.getLogger("ayur")
-logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler(sys.stdout)
-handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-logger.addHandler(handler)
+def sanitize_for_pdf(s: str) -> str:
+    """
+    Conservative sanitization:
+    - Correct specific misspellings (Extraversion -> Extroversion etc.)
+    - Replace only whole-word occurrences of 'you' / 'your' with safer phrasing,
+      but only when those tokens appear (best-effort).
+    """
+    if not s:
+        return s
 
-# ======== APP DIRs & files =========
-# set APP_DIR: prefer to keep app data in user home folder for runtime state
-APP_DIR = Path(__file__).parent.resolve()  # keep simple: use project dir
+    r = s
+
+    # 1) Spelling fixes (whole words)
+    r = re.sub(r'\bExtraversion\b', 'Extroversion', r)
+    r = re.sub(r'\bextraversion\b', 'extroversion', r)
+    r = re.sub(r'\bIntraversion\b', 'Introversion', r)
+    r = re.sub(r'\bintraversion\b', 'introversion', r)
+
+    # 2) Label fix
+    r = re.sub(r'\bTop career\b', 'Potential Employment Roles', r)
+
+    # 3) Safe, conservative person-token replacements (word-boundary only).
+    #    This avoids corrupting strings where 'you' is part of another token.
+    #    Replace ' you ' or start/end variants with "the client" — but only if isolated.
+    r = re.sub(r'\bYou\b', 'The client', r)
+    r = re.sub(r'\byou\b', 'the client', r)
+    r = re.sub(r'\bYour\b', "The client's", r)
+    r = re.sub(r'\byour\b', "the client's", r)
+
+    # 4) Trim excessive whitespace after modifications
+    r = re.sub(r'\s+', ' ', r).strip()
+
+    return r
+
+
+
+# ---------------- Directories & app metadata ----------------
+APP_DIR = Path.home() / ".ayurprakriti_app"
+APP_DIR.mkdir(parents=True, exist_ok=True)
+FONTS_DIR = APP_DIR / "fonts"
+FONTS_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR = APP_DIR / "tmp"
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR = APP_DIR / "reports"
@@ -60,27 +104,9 @@ DB_PATH = APP_DIR / "ayurprakriti.db"
 CFG_PATH = APP_DIR / "config_rules.yaml"
 LOG_PATH = APP_DIR / "app_debug.log"
 
-# Try to copy logo from common container location or repo if present (safe, non-failing)
-try:
-    src_logo = Path("/mnt/data/logo.png")
-    dest_logo = APP_DIR / "logo.png"
-    # prefer container mount first
-    if src_logo.exists():
-        if not dest_logo.exists():
-            shutil.copy(str(src_logo), str(dest_logo))
-    else:
-        # fallback to repo logo next to script
-        repo_logo = Path(__file__).parent / "logo.png"
-        if repo_logo.exists():
-            if not dest_logo.exists():
-                shutil.copy(str(repo_logo), str(dest_logo))
-except Exception:
-    logger.exception("Logo copy failed (non-critical)")
+# Try to copy logo from common container location if present
 
-# local logo path
-logo_path = APP_DIR / "logo.png"
-
-# Branding default (editable)
+# Branding default (will be editable in UI)
 BRAND = {
     "clinic_name": "Kakunje Wellness",
     "tagline": "Authentic Ayurveda | Modern Precision",
@@ -94,7 +120,7 @@ BRAND = {
 
 # PDF watermark/footer defaults
 WCONF = {
-    "watermark_text": BRAND.get("clinic_name", ""),
+    "watermark_text": BRAND["clinic_name"],
     "watermark_opacity": 0.06,
     "show_footer_logo": True,
     "use_footer_signature": False,
@@ -102,170 +128,714 @@ WCONF = {
     "footer_signature_file": str(APP_DIR / "signature.png"),
 }
 
-# Psychometric display mapping
-_psy_label_map = {
-    "extraversion": "Extroversion",
-    "extravert": "Extroversion",
-    "extroversion": "Extroversion",
-    "openness": "Openness",
-    "agreeableness": "Agreeableness",
-    "conscientiousness": "Conscientiousness",
-    "emotionality": "Emotionality",
-    "neuroticism": "Emotionality",
-    "anxiety": "Anxiety",
-    "burnout": "Burnout",
-    "stress": "Stress",
+# ---------------- Logging ----------------
+logger = logging.getLogger("ayurprakriti_mega")
+if not logger.handlers:
+    fh = logging.FileHandler(LOG_PATH)
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(fh)
+logger.setLevel(logging.INFO)
+
+# ---------------- Config defaults (large questionnaire + mappings) ----------------
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+# Comprehensive question banks (expanded)
+DEFAULT_CFG = {
+    "meta": {
+        "app_name": "AyurPrakriti Pro Mega",
+        "version": "2.0",
+        "author": "Generated",
+    },
+    "questions": {
+        "prakriti": [
+            # Expanded set (sample ~25). Real deployments can extend via YAML UI.
+            {
+                "id": "P1",
+                "text": "Natural body frame: thin/slender",
+                "weights": {"Vata": 1.0},
+            },
+            {
+                "id": "P2",
+                "text": "Tendency for dry, rough skin",
+                "weights": {"Vata": 1.0},
+            },
+            {
+                "id": "P3",
+                "text": "Variable appetite / digestion",
+                "weights": {"Vata": 1.0},
+            },
+            {
+                "id": "P4",
+                "text": "Light sleep, easily awakened",
+                "weights": {"Vata": 1.0},
+            },
+            {
+                "id": "P5",
+                "text": "Quick, changeable mood",
+                "weights": {"Vata": 0.9, "Pitta": 0.1},
+            },
+            {"id": "P6", "text": "Warm body/flush easily", "weights": {"Pitta": 1.0}},
+            {
+                "id": "P7",
+                "text": "Strong appetite, tolerates spicy",
+                "weights": {"Pitta": 1.0},
+            },
+            {
+                "id": "P8",
+                "text": "Ambitious, focused under pressure",
+                "weights": {"Pitta": 0.8},
+            },
+            {"id": "P9", "text": "Calm, steady energy", "weights": {"Kapha": 1.0}},
+            {
+                "id": "P10",
+                "text": "Good endurance and build",
+                "weights": {"Kapha": 1.0},
+            },
+            {"id": "P11", "text": "Tendency to gain weight", "weights": {"Kapha": 1.0}},
+            {
+                "id": "P12",
+                "text": "Slow digestion vs regular digestion",
+                "weights": {"Kapha": 0.7, "Vata": 0.3},
+            },
+            {"id": "P13", "text": "Cold extremities often", "weights": {"Vata": 0.8}},
+            {
+                "id": "P14",
+                "text": "Perspiration: sweats easily",
+                "weights": {"Pitta": 0.7},
+            },
+            {
+                "id": "P15",
+                "text": "Memory: quick recall vs steady long-term",
+                "weights": {"Vata": 0.5, "Kapha": 0.5},
+            },
+            {
+                "id": "P16",
+                "text": "Preference for warm foods",
+                "weights": {"Vata": 0.6},
+            },
+            {
+                "id": "P17",
+                "text": "Tendency for oily skin",
+                "weights": {"Pitta": 0.6, "Kapha": 0.4},
+            },
+            {
+                "id": "P18",
+                "text": "Joint stiffness when inactive",
+                "weights": {"Kapha": 0.8},
+            },
+            {
+                "id": "P19",
+                "text": "Speech: fast vs slow",
+                "weights": {"Vata": 0.7, "Kapha": 0.3},
+            },
+            {
+                "id": "P20",
+                "text": "Physical strength & stamina",
+                "weights": {"Kapha": 0.7, "Pitta": 0.3},
+            },
+            {
+                "id": "P21",
+                "text": "Prone to allergies/congestion",
+                "weights": {"Kapha": 0.7, "Pitta": 0.3},
+            },
+            {
+                "id": "P22",
+                "text": "Easily excited / enthusiastic",
+                "weights": {"Vata": 0.7, "Pitta": 0.3},
+            },
+            {
+                "id": "P23",
+                "text": "Face color: reddish vs pale",
+                "weights": {"Pitta": 0.8, "Kapha": 0.4},
+            },
+            {
+                "id": "P24",
+                "text": "Thirst level (high/low)",
+                "weights": {"Pitta": 0.7, "Kapha": 0.3},
+            },
+            {
+                "id": "P25",
+                "text": "Tendency for constipation",
+                "weights": {"Vata": 0.9},
+            },
+        ],
+        "vikriti": [
+            # Expanded vikriti sample (~20)
+            {
+                "id": "V1",
+                "text": "Anxiety, restlessness today",
+                "weights": {"Vata": 1.0},
+            },
+            {"id": "V2", "text": "Racing thoughts, insomnia", "weights": {"Vata": 1.0}},
+            {"id": "V3", "text": "Cold hands/feet today", "weights": {"Vata": 0.8}},
+            {
+                "id": "V4",
+                "text": "Excess heat, anger, irritability",
+                "weights": {"Pitta": 1.0},
+            },
+            {
+                "id": "V5",
+                "text": "Acidity, heartburn, sour belching",
+                "weights": {"Pitta": 1.0},
+            },
+            {
+                "id": "V6",
+                "text": "Red rashes or inflammation",
+                "weights": {"Pitta": 1.0},
+            },
+            {
+                "id": "V7",
+                "text": "Heaviness, lethargy, sleepiness",
+                "weights": {"Kapha": 1.0},
+            },
+            {
+                "id": "V8",
+                "text": "Congestion, phlegm, mucus",
+                "weights": {"Kapha": 1.0},
+            },
+            {
+                "id": "V9",
+                "text": "Slow digestion, poor appetite",
+                "weights": {"Kapha": 0.8},
+            },
+            {
+                "id": "V10",
+                "text": "Joint stiffness or swelling",
+                "weights": {"Kapha": 0.7},
+            },
+            {
+                "id": "V11",
+                "text": "Excess thirst or dry mouth",
+                "weights": {"Pitta": 0.6},
+            },
+            {
+                "id": "V12",
+                "text": "Loose stools or irregular digestion",
+                "weights": {"Vata": 0.8},
+            },
+            {"id": "V13", "text": "Excess worrying today", "weights": {"Vata": 0.9}},
+            {
+                "id": "V14",
+                "text": "Agitation or short temper",
+                "weights": {"Pitta": 0.9},
+            },
+            {"id": "V15", "text": "Sleep fragmented", "weights": {"Vata": 0.8}},
+            {
+                "id": "V16",
+                "text": "Sensation of heaviness in the head",
+                "weights": {"Kapha": 0.7},
+            },
+            {"id": "V17", "text": "Excess sweating", "weights": {"Pitta": 0.5}},
+            {"id": "V18", "text": "Reduced motivation", "weights": {"Kapha": 0.8}},
+            {
+                "id": "V19",
+                "text": "Unusual cravings (salty/sweet)",
+                "weights": {"Kapha": 0.6},
+            },
+            {
+                "id": "V20",
+                "text": "Irritable bowel symptoms",
+                "weights": {"Pitta": 0.6, "Vata": 0.4},
+            },
+        ],
+        "psychometric": [
+            # Expanded personality-like items (10 pairs)
+            {"id": "E1", "text": "Outgoing, enthusiastic"},
+            {"id": "E6", "text": "Reserved, quiet"},
+            {"id": "A1", "text": "Often critical"},
+            {"id": "A6", "text": "Warm, sympathetic"},
+            {"id": "C1", "text": "Organized, reliable"},
+            {"id": "C6", "text": "Disorganized, careless"},
+            {"id": "N1", "text": "Often anxious"},
+            {"id": "N6", "text": "Emotionally stable"},
+            {"id": "O1", "text": "Open to new ideas"},
+            {"id": "O6", "text": "Conventional, prefers routine"},
+        ],
+    },
+    "mappings": {
+        "career_rules": {
+            "Vata": ["Writer", "Designer", "Consultant - Creative", "Researcher"],
+            "Pitta": ["Clinician", "Analyst", "Manager", "Engineer"],
+            "Kapha": ["Teacher", "Counselor", "Hospitality", "HR", "Agriculture"],
+        },
+        "dosha_thresholds": {"mild": 55, "moderate": 70, "severe": 85},
+    },
 }
 
-# ---------- Helpers ----------
-def _neutralize_personal_tone(text: str) -> str:
-    """
-    Convert common second-person phrasing to neutral third-person clinical phrasing.
-    """
-    if not text:
-        return text
-    t = str(text)
-    t = re.sub(r'\b[Yy]ou\s+have\b', 'the client presents with', t)
-    t = re.sub(r'\b[Yy]ou\s+may\b', 'there may be', t)
-    t = re.sub(r'\b[Yy]ou\s+are\b', 'the client is', t)
-    t = re.sub(r'\b[Yy]ou\s+can\b', 'it may be useful to', t)
-    t = re.sub(r'\b[Yy]ou\b', 'the client', t)
-    t = re.sub(r'\bthe client is the client\b', 'the client', t)
-    t = re.sub(r'\s{2,}', ' ', t)
-    return t.strip()
+# If config file not present, write defaults
+if not CFG_PATH.exists():
+    with open(CFG_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(DEFAULT_CFG, f, sort_keys=False)
+# Load config
+with open(CFG_PATH, "r", encoding="utf-8") as f:
+    CONFIG = yaml.safe_load(f)
 
-# Career domain templates used for scoring
-CAREER_DOMAINS = [
-    ("Creative / Writing / Design", ["Vata", "Openness"]),
-    ("Research / Analysis / Teaching", ["Pitta", "Conscientiousness"]),
-    ("Leadership / Management", ["Pitta", "Extroversion"]),
-    ("Caregiving / Wellness / Counsel", ["Kapha", "Agreeableness"]),
-    ("Hospitality & Wellness Operations", ["Kapha", "Conscientiousness"]),
-    ("Entrepreneurship / Product", ["Vata", "Extroversion", "Openness"]),
-]
+# ---------------- Database init ----------------
+conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+cur = conn.cursor()
+cur.executescript(
+    """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    display_name TEXT,
+    password_hash TEXT,
+    role TEXT DEFAULT 'clinician',
+    created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS patients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    age INTEGER,
+    gender TEXT,
+    contact TEXT,
+    created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    patient_id INTEGER,
+    assessor TEXT,
+    data_json TEXT,
+    created_at TEXT,
+    FOREIGN KEY(patient_id) REFERENCES patients(id)
+);
+"""
+)
+conn.commit()
 
-def _career_rationale_for_report(cr, prakriti_pct, vikriti_pct, psych_pct):
-    """
-    Slightly longer, personalised rationale for one career suggestion (cr is a dict).
-    We will derive a personalised rationale using predominant prakriti/vikriti and psych.
-    """
-    role = cr.get("role", "Role")
-    score = cr.get("score", "")
-    # Avoid using cr['reason'] directly because it may be generic/repeated across entries.
-    # Build rationale from constitution and psych
-    parts = []
+# Create default admin if missing
+cur.execute("SELECT COUNT(1) FROM users")
+if cur.fetchone()[0] == 0:
+    ph = pwd_context.hash("admin123")
+    cur.execute(
+        "INSERT INTO users (username, display_name, password_hash, role, created_at) VALUES (?,?,?,?,?)",
+        ("admin", "Administrator", ph, "admin", datetime.now().isoformat()),
+    )
+    conn.commit()
+
+
+# ---------------- Utility helpers ----------------
+def verify_user(username, password):
+    cur.execute(
+        "SELECT password_hash, display_name, role FROM users WHERE username=?",
+        (username,),
+    )
+    r = cur.fetchone()
+    if not r:
+        return False, None
+    ph, display, role = r
     try:
-        dom_pr = max(prakriti_pct, key=prakriti_pct.get)
-        parts.append(f"predominant {dom_pr} constitution")
+        ok = pwd_context.verify(password, ph)
     except Exception:
-        dom_pr = None
+        ok = False
+    return ok, {"display_name": display, "role": role}
+
+
+def create_patient(name, age, gender, contact):
+    cur.execute(
+        "INSERT INTO patients (name, age, gender, contact, created_at) VALUES (?,?,?,?,?)",
+        (name, age, gender, contact, datetime.now().isoformat()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def save_assessment(patient_id, assessor, data):
+    cur.execute(
+        "INSERT INTO assessments (patient_id, assessor, data_json, created_at) VALUES (?,?,?,?)",
+        (
+            patient_id,
+            assessor,
+            json.dumps(data, ensure_ascii=False),
+            datetime.now().isoformat(),
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def load_patients():
+    return pd.read_sql_query("SELECT * FROM patients ORDER BY created_at DESC", conn)
+
+
+def load_assessments(patient_id=None):
+    if patient_id:
+        return pd.read_sql_query(
+            "SELECT * FROM assessments WHERE patient_id=? ORDER BY created_at DESC",
+            conn,
+            params=(patient_id,),
+        )
+    return pd.read_sql_query("SELECT * FROM assessments ORDER BY created_at DESC", conn)
+
+
+# ---------------- Scoring functions (dosha, psych) ----------------
+def score_dosha_from_answers(answers, question_list):
+    totals = {"Vata": 0.0, "Pitta": 0.0, "Kapha": 0.0}
+    for q in question_list:
+        qid = q["id"]
+        w = q.get("weights", {})
+        val = answers.get(qid, 3)
+        for d in totals:
+            totals[d] += w.get(d, 0) * float(val)
+    s = sum(totals.values())
+    if s <= 0:
+        return {k: round(100 / 3, 1) for k in totals}
+    return {k: round((v / s) * 100, 1) for k, v in totals.items()}
+
+
+def psychometric_tipiscale(answers):
     try:
-        cur_vk = max(vikriti_pct, key=vikriti_pct.get)
-        parts.append(f"current tendency toward {cur_vk}")
+        ext = (answers["E1"] + (8 - answers["E6"])) / 2.0
+        agr = (((8 - answers["A1"]) + answers["A6"])) / 2.0
+        con = (answers["C1"] + (8 - answers["C6"])) / 2.0
+        emo = (answers["N1"] + (8 - answers["N6"])) / 2.0
+        ope = (answers["O1"] + (8 - answers["O6"])) / 2.0
     except Exception:
-        cur_vk = None
-    try:
-        top_psy_key = max(psych_pct, key=psych_pct.get) if psych_pct else None
-        top_psy_label = _psy_label_map.get(top_psy_key.strip().lower(), top_psy_key.title()) if top_psy_key else None
-        if top_psy_label:
-            parts.append(f"psychometric profile: {top_psy_label}")
-    except Exception:
-        pass
+        return {
+            "Extraversion": 50,
+            "Agreeableness": 50,
+            "Conscientiousness": 50,
+            "Emotionality": 50,
+            "Openness": 50,
+        }
+    raw = {
+        "Extraversion": ext,
+        "Agreeableness": agr,
+        "Conscientiousness": con,
+        "Emotionality": emo,
+        "Openness": ope,
+    }
+    return {k: round((v - 1) / 6 * 100, 1) for k, v in raw.items()}
 
-    combined = "; ".join([p for p in parts if p])
-    tailored = ""
-    if dom_pr == "Vata":
-        tailored = "Supports creative, flexible roles allowing autonomy and variety."
-    elif dom_pr == "Pitta":
-        tailored = "Fits analytical, decision-oriented roles with structure and responsibility."
-    elif dom_pr == "Kapha":
-        tailored = "Suitable for steady, people-centered, supportive roles with routine."
 
-    # incorporate cr.get('reason') only if it's non-generic
-    extra = cr.get("reason", "")
-    if extra and len(extra) > 40:
-        extra_clean = _neutralize_personal_tone(extra)
-        extra_text = f" {extra_clean}"
-    else:
-        extra_text = ""
+# ---------------- Recommendation engines ----------------
+def recommend_career(dosha_percent, psycho_pct, cfg=CONFIG):
+    dom = max(dosha_percent, key=dosha_percent.get)
+    base = cfg["mappings"]["career_rules"].get(dom, [])
+    recs = []
+    for r in base:
+        score = 50
+        if psycho_pct.get("Openness", 50) > 65 and (
+            "Research" in r or "Creative" in r or "Writer" in r
+        ):
+            score += 10
+        if psycho_pct.get("Conscientiousness", 50) > 65 and (
+            "Manager" in r or "Engineer" in r
+        ):
+            score += 8
+        if psycho_pct.get("Extraversion", 50) > 60 and (
+            "Clinician" in r or "Teacher" in r
+        ):
+            score += 6
+        recs.append(
+            {
+                "role": r,
+                "score": score,
+                "reason": f"Matches dominant {dom} + personality cues.",
+            }
+        )
+    if psycho_pct.get("Openness", 50) > 70 and not any(
+        "Research" in x["role"] for x in recs
+    ):
+        recs.append(
+            {
+                "role": "Research & Innovation",
+                "score": 65,
+                "reason": "High openness suggests research fit.",
+            }
+        )
+    return sorted(recs, key=lambda x: -x["score"])
 
-    if combined:
-        final = f"{role} — {combined}. {tailored}{extra_text} (score: {score})."
-    else:
-        final = f"{role} — {tailored}{extra_text} (score: {score})."
-    return final
 
-# ========== Chart helpers (simple, robust using matplotlib) ==========
-def _make_bar_chart(data_dict, title, out_path):
-    """
-    Make a horizontal bar chart for the dict and save as PNG.
-    data_dict: mapping label->value (numbers)
-    """
-    if not data_dict:
-        return
-    labels = list(data_dict.keys())
-    values = [float(v) for v in data_dict.values()]
-    y_pos = np.arange(len(labels))
-    plt.figure(figsize=(6, 1.8 + 0.3 * len(labels)))
-    bars = plt.barh(y_pos, values, align='center')
-    plt.yticks(y_pos, labels)
-    plt.xlabel('%')
-    plt.title(title)
-    plt.xlim(0, max(100, max(values) + 5))
-    plt.gca().invert_yaxis()
-    plt.tight_layout()
-    plt.savefig(str(out_path), dpi=150)
-    plt.close()
+def recommend_relationship(dosha_pct, psycho_pct):
+    tips = []
+    dom = max(dosha_pct, key=dosha_pct.get)
+    if dom == "Vata":
+        tips.append(
+            (
+                "Stability & routines",
+                "Vata benefits from grounding, predictable routines; short daily check-ins help.",
+            )
+        )
+    if dom == "Pitta":
+        tips.append(
+            (
+                "Cooling communication",
+                "Pause before responding and use neutral language during disagreements.",
+            )
+        )
+    if dom == "Kapha":
+        tips.append(
+            (
+                "Introduce small novelty",
+                "Gentle new activities reduce inertia and boost engagement.",
+            )
+        )
+    if psycho_pct.get("Agreeableness", 50) < 40:
+        tips.append(
+            (
+                "Reflective listening",
+                "Summarize what partner said before giving your view.",
+            )
+        )
+    if psycho_pct.get("Emotionality", 50) > 60:
+        tips.append(
+            (
+                "Emotion regulation",
+                "Use 3-minute breathing or journaling before difficult talks.",
+            )
+        )
+    return tips
 
-def make_radar_chart(prakriti_pct, vikriti_pct, out_path):
-    """
-    Create a simple radar-like triangle overlay for three doshas if data present.
-    This is a lightweight representation that produces a PNG.
-    """
-    # choose the 3 doshas in consistent order
-    labels = ['Vata', 'Pitta', 'Kapha']
-    def to_vals(source):
-        return [float(source.get(l, 0)) for l in labels]
-    vals1 = to_vals(prakriti_pct or {})
-    vals2 = to_vals(vikriti_pct or {})
-    # normalize to 0-100
-    vals1 = [min(100, max(0, v)) for v in vals1]
-    vals2 = [min(100, max(0, v)) for v in vals2]
 
-    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
-    vals1 = vals1 + vals1[:1]
-    vals2 = vals2 + vals2[:1]
-    angles = angles + angles[:1]
+def recommend_health(dosha_pct, vikriti_pct, cfg=CONFIG):
+    dom = max(dosha_pct, key=dosha_pct.get)
+    rec = {"diet": [], "lifestyle": [], "herbs": [], "severity": {}}
+    for d in dosha_pct:
+        score = round((dosha_pct[d] + vikriti_pct.get(d, 0)) / 2, 1)
+        if score >= cfg["mappings"]["dosha_thresholds"]["severe"]:
+            rec["severity"][d] = "severe"
+        elif score >= cfg["mappings"]["dosha_thresholds"]["moderate"]:
+            rec["severity"][d] = "moderate"
+        elif score >= cfg["mappings"]["dosha_thresholds"]["mild"]:
+            rec["severity"][d] = "mild"
+        else:
+            rec["severity"][d] = "balanced"
+    if dom == "Vata":
+        rec["diet"] = [
+            "Warm, cooked meals; include healthy oils; regular meal timings; avoid iced drinks first thing."
+        ]
+        rec["lifestyle"] = [
+            "Daily warm oil massage (Abhyanga) 5–10 min; grounding morning routine; consistent sleep schedule."
+        ]
+        rec["herbs"] = ["Ashwagandha (under clinician guidance), Bala for strength."]
+    if dom == "Pitta":
+        rec["diet"] = [
+            "Cooling foods; reduce spicy, fried and fermented foods; include bitter greens."
+        ]
+        rec["lifestyle"] = [
+            "Avoid midday heat; cooling pranayama; calm, regular breaks."
+        ]
+        rec["herbs"] = ["Amla, Guduchi (clinician review)."]
+    if dom == "Kapha":
+        rec["diet"] = ["Light, warm, slightly astringent foods; reduce dairy & sweets."]
+        rec["lifestyle"] = [
+            "Stimulating exercise 30–60 min daily; vary routine; dry massage (udvartana)."
+        ]
+        rec["herbs"] = ["Trikatu, Guggulu (clinician supervision)."]
+    return rec
 
-    fig = plt.figure(figsize=(4, 4))
+
+# ---------------- Charting helpers (bars + radar) ----------------
+def _make_bar_chart(series: dict, title: str, filename: Path):
+    plt.close("all")
+    keys = list(series.keys())
+    vals = [series[k] for k in keys]
+    fig, ax = plt.subplots(figsize=(6, 2.6))
+    palette = ["#6fbf73", "#f5a623", "#6fb0d9"]
+    bars = ax.bar(keys, vals, color=palette[: len(keys)])
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("Percent")
+    ax.set_title(title, fontsize=10)
+    for bar, v in zip(bars, vals):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            v + 1,
+            f"{v}%",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+    fig.tight_layout()
+    fig.savefig(filename, dpi=150)
+    plt.close(fig)
+
+
+def make_radar_chart(prakriti, vikriti, filename: Path, title="Prakriti vs Vikriti"):
+    labels = list(prakriti.keys())
+    n = len(labels)
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    vals1 = [prakriti[l] for l in labels]
+    vals2 = [vikriti.get(l, 0) for l in labels]
+    vals1 += vals1[:1]
+    vals2 += vals2[:1]
+    angles += angles[:1]
+    fig = plt.figure(figsize=(4.2, 4.2))
     ax = fig.add_subplot(111, polar=True)
-    ax.plot(angles, vals1, linewidth=1, linestyle='-', label='Prakriti')
-    ax.fill(angles, vals1, alpha=0.15)
-    ax.plot(angles, vals2, linewidth=1, linestyle='--', label='Vikriti')
-    ax.fill(angles, vals2, alpha=0.10)
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    ax.plot(angles, vals1, linewidth=2, label="Prakriti")
+    ax.fill(angles, vals1, alpha=0.25)
+    ax.plot(angles, vals2, linewidth=2, label="Vikriti")
+    ax.fill(angles, vals2, alpha=0.12)
     ax.set_thetagrids(np.degrees(angles[:-1]), labels)
     ax.set_ylim(0, 100)
-    ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1.1))
+    ax.set_title(title, pad=10)
+    ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.1))
     plt.tight_layout()
-    fig.savefig(str(out_path), dpi=150)
-    plt.close()
+    fig.savefig(filename, dpi=150)
+    plt.close(fig)
 
-# ---------- Legend helper for PDF ----------
-def _color_box(hexcolor):
-    b = Table([['']], colWidths=[8 * mm], rowHeights=[6 * mm])
-    b.setStyle(TableStyle([('BACKGROUND', (0, 0), (0, 0), colors.HexColor(hexcolor)), ('BOX', (0, 0), (0, 0), 0.25, colors.lightgrey)]))
-    return b
 
-def _legend_table(styles):
-    rows = []
-    rows.append([_color_box(BRAND.get('accent_color', '#0F7A61')), Paragraph('Prakriti', styles['AP_Body'])])
-    rows.append([_color_box('#3CB371'), Paragraph('Vikriti', styles['AP_Body'])])
-    rows.append([_color_box('#7B61FF'), Paragraph('Psychometric', styles['AP_Body'])])
-    t = Table(rows, colWidths=[10 * mm, 70 * mm])
-    t.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('LEFTPADDING', (0,0), (-1,-1), 2)]))
-    return t
+# ---------------- Fonts registration (DejaVu) ----------------
+DEJAVU_PATH = None
+_fonts = list(FONTS_DIR.glob("DejaVuSans*.ttf"))
+if _fonts:
+    DEJAVU_PATH = str(_fonts[0])
+else:
+    for cand in [
+        r"C:\Windows\Fonts\DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/Library/Fonts/DejaVuSans.ttf",
+    ]:
+        if os.path.exists(cand):
+            DEJAVU_PATH = cand
+            break
+if DEJAVU_PATH:
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVuSans", DEJAVU_PATH))
+        logger.info("Registered DejaVu font: %s", DEJAVU_PATH)
+    except Exception:
+        logger.exception("Failed to register DejaVu")
 
-# ========== Main PDF Builder: branded_pdf_report ==========
+
+# ---------------- Plain-language "WOW" advice generator ----------------
+def generate_wow_advice(
+    patient, prakriti_pct, vikriti_pct, psych_pct, career_recs, rel_tips, health_recs
+):
+    """
+    Generate neutral, third-person 'wow' advice suitable for auto-inclusion in reports.
+    - No second-person "you" phrasing.
+    - Doctor's note in third-person style (optional formal text).
+    """
+    # dominant and current
+    dom = max(prakriti_pct, key=prakriti_pct.get)
+    current = max(vikriti_pct, key=vikriti_pct.get)
+
+    # Hero / one-line insight in third-person
+    name = patient.get("name", "The client")
+    current_state_desc = {
+        "Kapha": "a tendency toward heaviness and slow energy at present",
+        "Vata": "a tendency toward variability, restlessness, or scattered attention at present",
+        "Pitta": "a tendency toward internal heat, impatience, or increased metabolic drive at present",
+    }.get(current, "a variable state at present")
+    hero = (
+        f"{name} exhibits {dom}-type constitutional tendencies such as creativity and quick ideation; "
+        f"currently {current_state_desc}."
+    )
+
+    # 90-day plan written as neutral instructions (third-person)
+    plan_lines = [
+        "90-day transformation plan (small actions → identity change):",
+        "Day 1: Identity pledge — write one line committing to sustained focused effort.",
+        "Days 1–21: Establish core daily ritual — warm water on waking, a short warm-oil application or gentle stretching (5–10 min), and one focused work block (60–90 min).",
+        "Weeks 4–12: Deliver one small creative or structured output every 2–3 weeks and solicit feedback.",
+        "Accountability: arrange a weekly peer check-in (2 minutes) for 12 weeks.",
+        "Measure: record morning energy (1–5) and total sleep time daily; review at day 14, 45, and 90.",
+    ]
+    plan = "\n".join(plan_lines)
+
+    # Habit stack (third-person phrasing)
+    habit_stack_lines = [
+        "Life-changing habit stack (15–25 minutes total):",
+        "A) Warm water on waking followed by 2 minutes of paced breathing (inhale 4s / exhale 6s).",
+        "B) 5–10 minutes of warm oil application (Abhyanga) or 10 minutes of targeted stretching.",
+        "C) One focused work block (60–90 minutes) with a timer.",
+        "D) Evening reflection: note two accomplishments and one task for the following day.",
+    ]
+    habit_stack = "\n".join(habit_stack_lines)
+
+    wow_tips_lines = [
+        "- Reduce decision fatigue by limiting morning choices to three items (clothes/breakfast).",
+        "- Ship a small deliverable each week to build momentum.",
+        "- Use two-minute accountability with a peer to sustain micro-commitments.",
+        "- Reassess and refine the plan after 14 days; small consistent changes compound.",
+    ]
+    wow_tips = "\n".join(wow_tips_lines)
+
+    checklist_lines = [
+        "ONE-PAGE ACTION CHECKLIST",
+        "- Morning: warm water + 2 min breathing + 5–10 min oil rub/stretch",
+        "- Work: 1–2 focused blocks (60–90 min each). Timer ON.",
+        "- Movement: 25–35 min daily walk or yoga.",
+        "- Evening: light dinner earlier; reflect on two wins.",
+        "- Weekly: share a small project and plan next week (20 min).",
+        "- Accountability: weekly check-in with a chosen peer for 12 weeks.",
+    ]
+    checklist = "\n".join(checklist_lines)
+
+    doctor_note = (
+        "Doctor's note (formal): The recommendations above reflect the assessment recorded on the report date. "
+        "Small, consistent actions are advised; a clinical review after two weeks is recommended for refinement."
+    )
+
+    return {
+        "hero": hero,
+        "plan": plan,
+        "habit_stack": habit_stack,
+        "wow_tips": wow_tips,
+        "checklist": checklist,
+        "doctor_note": doctor_note,
+    }
+
+
+
+# ---------------- One-page Action Plan PDF ----------------
+def onepage_actionplan_pdf(patient, checklist_text, hero_text):
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    left = 20 * mm
+    y = A4[1] - 30 * mm
+    try:
+        if DEJAVU_PATH:
+            c.setFont("DejaVuSans", 14)
+        else:
+            c.setFont("Helvetica-Bold", 14)
+    except:
+        c.setFont("Helvetica-Bold", 14)
+    c.drawString(left, y, BRAND["clinic_name"])
+    y -= 8 * mm
+    c.setFont("Helvetica", 10)
+    c.drawString(left, y, hero_text)
+    y -= 9 * mm
+    c.setFont("Helvetica", 10)
+    for line in checklist_text.split("\n"):
+        if not line.strip():
+            continue
+        if line.startswith("- "):
+            c.drawString(left + 4 * mm, y, "\u2022 " + line[2:])
+        else:
+            c.drawString(left, y, line)
+        y -= 7 * mm
+        if y < 30 * mm:
+            c.showPage()
+            y = A4[1] - 30 * mm
+    c.setFont("Helvetica", 8)
+    c.drawString(
+        left, 12 * mm, f"{BRAND['clinic_name']} — {BRAND['phone']} — {BRAND['email']}"
+    )
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+# ---------------- Simple text wrapper ----------------
+def _wrap_text_simple(text, chars_per_line=95):
+    words = str(text).split()
+    lines = []
+    cur = ""
+    for w in words:
+        if len(cur) + len(w) + 1 <= chars_per_line:
+            cur = cur + (" " if cur else "") + w
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+# ---------------- PDF builders: platypus branded + fallback canvas ----------------
 def branded_pdf_report(
     patient,
     prakriti_pct,
@@ -278,339 +848,390 @@ def branded_pdf_report(
     report_id=None,
     wconf=None,
     wow=None,
-    guideline_text=None,
-    doctor_note=None,
 ):
-    """
-    Build a polished PDF report (ReportLab Platypus).
-    Returns BytesIO buffer containing the PDF.
-    """
     if wconf is None:
         wconf = WCONF
-
-    # prepare chart image paths (unique names)
-    tstamp = int(datetime.now().timestamp() * 1000)
-    p1 = TMP_DIR / f"prakriti_{tstamp}.png"
-    p2 = TMP_DIR / f"vikriti_{tstamp}.png"
-    p3 = TMP_DIR / f"psych_{tstamp}.png"
-    radar = TMP_DIR / f"radar_{tstamp}.png"
-
-    # Generate charts (safe)
+    # generate charts
+    p1 = TMP_DIR / f"prakriti_{int(datetime.now().timestamp())}.png"
+    p2 = TMP_DIR / f"vikriti_{int(datetime.now().timestamp())}.png"
+    p3 = TMP_DIR / f"psych_{int(datetime.now().timestamp())}.png"
+    radar = TMP_DIR / f"radar_{int(datetime.now().timestamp())}.png"
     try:
-        _make_bar_chart(prakriti_pct or {}, "Prakriti (constitutional %)", p1)
-        _make_bar_chart(vikriti_pct or {}, "Vikriti (today %)", p2)
-        # normalize psych labels
-        psych_for_chart = {}
-        for k, v in (psych_pct or {}).items():
-            lab = _psy_label_map.get(k.strip().lower(), k.title())
-            psych_for_chart[lab] = v
-        _make_bar_chart(psych_for_chart, "Psychometric (approx %)", p3)
-        make_radar_chart(prakriti_pct or {}, vikriti_pct or {}, radar)
-        logger.info("Charts created: p1 %s p2 %s p3 %s radar %s", p1.exists(), p2.exists(), p3.exists(), radar.exists())
+        _make_bar_chart(prakriti_pct, "Prakriti (constitutional %)", p1)
+        _make_bar_chart(vikriti_pct, "Vikriti (today %)", p2)
+        _make_bar_chart(psych_pct, "Psychometric (approx %)", p3)
+        make_radar_chart(prakriti_pct, vikriti_pct, radar)
     except Exception:
-        logger.exception("Chart generation failed; continuing without charts")
+        logger.exception("Chart generation failed")
 
     try:
         buf = BytesIO()
-        # Increase bottomMargin to avoid footer overlap
         doc = SimpleDocTemplate(
             buf,
             pagesize=A4,
             leftMargin=18 * mm,
             rightMargin=18 * mm,
             topMargin=18 * mm,
-            bottomMargin=35 * mm,  # increased
+            bottomMargin=18 * mm,
+        )
+        styles = getSampleStyleSheet()
+        base_font = "DejaVuSans" if DEJAVU_PATH else "Helvetica"
+        accent = colors.HexColor(BRAND["accent_color"])
+        styles.add(
+            ParagraphStyle(
+                name="AP_Title",
+                fontName=base_font,
+                fontSize=18,
+                leading=22,
+                spaceAfter=6,
+            )
+        )
+        styles.add(
+            ParagraphStyle(name="AP_Small", fontName=base_font, fontSize=9, leading=11)
+        )
+        styles.add(
+            ParagraphStyle(
+                name="AP_Heading",
+                fontName=base_font,
+                fontSize=12,
+                leading=14,
+                spaceBefore=8,
+                spaceAfter=4,
+                textColor=accent,
+            )
+        )
+        styles.add(
+            ParagraphStyle(name="AP_Body", fontName=base_font, fontSize=10, leading=13)
+        )
+        styles.add(
+            ParagraphStyle(
+                name="AP_Bullet",
+                fontName=base_font,
+                fontSize=10,
+                leading=12,
+                leftIndent=12,
+                bulletIndent=6,
+            )
         )
 
-        styles = getSampleStyleSheet()
-        base_font = "DejaVuSans" if False else "Helvetica"
-        accent = colors.HexColor(BRAND.get("accent_color", "#0F7A61"))
-
-        styles.add(ParagraphStyle(name="AP_Title", fontName=base_font, fontSize=18, leading=22, spaceAfter=6))
-        styles.add(ParagraphStyle(name="AP_Small", fontName=base_font, fontSize=9, leading=11))
-        styles.add(ParagraphStyle(name="AP_Heading", fontName=base_font, fontSize=12, leading=14, spaceBefore=8, spaceAfter=4, textColor=accent))
-        styles.add(ParagraphStyle(name="AP_Body", fontName=base_font, fontSize=10, leading=13))
-        styles.add(ParagraphStyle(name="AP_Bullet", fontName=base_font, fontSize=10, leading=12, leftIndent=10, bulletIndent=4))
-
         flow = []
-
-        # Header (logo + clinic info)
+        # Cover / Hero
         flow.append(Spacer(1, 6))
-        try:
-            if logo_path.exists():
+        # header with logo if exists
+        logo_path = APP_DIR / "logo.png"
+        if logo_path.exists():
+            try:
                 img = RLImage(str(logo_path), width=40 * mm, height=40 * mm)
-                clinic_info = Paragraph(f"<b>{BRAND.get('clinic_name','')}</b><br/>{BRAND.get('tagline','')}", styles["AP_Body"])
+                clinic_info = Paragraph(
+                    f"<b>{BRAND['clinic_name']}</b><br/>{BRAND['tagline']}<br/><font size=9>{BRAND['website']}</font>",
+                    styles["AP_Body"],
+                )
                 header_t = Table([[img, clinic_info]], colWidths=[45 * mm, 120 * mm])
-                header_t.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "MIDDLE"), ("LEFTPADDING", (0,0), (-1,-1), 0)]))
+                header_t.setStyle(
+                    TableStyle(
+                        [
+                            ("VALIGN", (0, 0), (1, 0), "TOP"),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                        ]
+                    )
+                )
                 flow.append(header_t)
-            else:
-                flow.append(Paragraph(f"<b>{BRAND.get('clinic_name','')}</b><br/>{BRAND.get('tagline','')}", styles["AP_Title"]))
-        except Exception:
-            logger.exception("Header logo insertion failed")
-            flow.append(Paragraph(f"<b>{BRAND.get('clinic_name','')}</b>", styles["AP_Title"]))
-
+            except Exception:
+                flow.append(
+                    Paragraph(
+                        f"<b>{BRAND['clinic_name']}</b><br/>{BRAND['tagline']}",
+                        styles["AP_Title"],
+                    )
+                )
+        else:
+            flow.append(
+                Paragraph(
+                    f"<b>{BRAND['clinic_name']}</b><br/>{BRAND['tagline']}",
+                    styles["AP_Title"],
+                )
+            )
         flow.append(Spacer(1, 6))
-        flow.append(Paragraph(f"<b>{patient.get('name','Patient Name')}</b>", styles["AP_Title"]))
+        # hero name + short insight
+        flow.append(
+            Paragraph(
+                f"<b>{patient.get('name','Patient Name')}</b>", styles["AP_Title"]
+            )
+        )
         if wow and wow.get("hero"):
-            flow.append(Paragraph(_neutralize_personal_tone(wow.get("hero")), styles["AP_Body"]))
+            flow.append(Paragraph(wow.get("hero"), styles["AP_Body"]))
         flow.append(Spacer(1, 8))
 
-        # Badges row
-        try:
-            dom = max(prakriti_pct, key=prakriti_pct.get) if prakriti_pct else "-"
-            cur = max(vikriti_pct, key=vikriti_pct.get) if vikriti_pct else "-"
-        except Exception:
-            dom, cur = "-", "-"
+                # badges row (third-person labels)
         badges = [
-            Paragraph(f"<b>Dominant</b><br/>{dom}", styles["AP_Body"]),
-            Paragraph(f"<b>Current</b><br/>{cur}", styles["AP_Body"]),
-            Paragraph(f"<b>Top career</b><br/>{career_recs[0]['role'] if career_recs else '-'}", styles["AP_Body"]),
+            Paragraph(
+                f"<b>Dominant</b><br/>{max(prakriti_pct, key=prakriti_pct.get)}",
+                styles["AP_Body"],
+            ),
+            Paragraph(
+                f"<b>Current</b><br/>{max(vikriti_pct, key=vikriti_pct.get)}",
+                styles["AP_Body"],
+            ),
+            Paragraph(
+                f"<b>Potential Employment Roles</b><br/>{', '.join([c['role'] for c in career_recs[:2]]) if career_recs else '-'}",
+                styles["AP_Body"],
+            ),
         ]
-        t_badges = Table([[badges[0], badges[1], badges[2]]], colWidths=[60 * mm, 60 * mm, 60 * mm])
-        t_badges.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke), ("VALIGN", (0,0), (-1,-1), "MIDDLE"), ("ALIGN", (0,0), (-1,-1), "CENTER")]))
+        t_badges = Table(
+            [[badges[0], badges[1], badges[2]]], colWidths=[60 * mm, 60 * mm, 60 * mm]
+        )
+        t_badges.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ]
+            )
+        )
         flow.append(t_badges)
         flow.append(Spacer(1, 8))
 
-        # Executive summary
+
+            # inside your PDF builder where radar image + legend are added, replace with this block:
+
+            # -- prepare sanitized legend strings
+        legend_lines = [
+                "Legend: Prakriti = baseline constitutional tendencies (0–100).",
+                "        Vikriti = current functional state (0–100).",
+                "Numeric values (Prakriti): " + ", ".join([f"{k} {v:.1f}%" for k, v in prakriti_pct.items()]),
+                "Numeric values (Vikriti): " + ", ".join([f"{k} {v:.1f}%" for k, v in vikriti_pct.items()]),
+            ]
+        legend_lines = [sanitize_for_pdf(l) for l in legend_lines]
+
+            # -- if radar image exists, resize it to fit page safely and embed
+        if radar.exists():
+                try:
+                    # open with PIL to measure and resize while preserving aspect ratio
+                    with PILImage.open(str(radar)) as pil:
+                        # page geometry & margins (tweak if your template uses different margins)
+                        page_w, page_h = A4  # in points
+                        margin = (20 * mm)  # same as your doc margins if set similar
+                        header_space = 60 * mm  # safe header area
+                        footer_space = 25 * mm
+                        # compute max height available for the radar (conservative)
+                        max_img_h = page_h - (margin * 2) - header_space - footer_space - (40 * mm)
+                        max_img_w = page_w - (margin * 2)
+
+                        # compute scaling factor
+                        w, h = pil.size
+                        w_pt = (w / pil.info.get('dpi', (72,72))[0]) * 72 if 'dpi' in pil.info else w
+                        # simpler: scale by pixel ratio
+                        scale = min(max_img_w / w, max_img_h / h, 1.0)
+                        new_w = int(w * scale)
+                        new_h = int(h * scale)
+
+                        # resize and save to temp file
+                        resized_path = str(radar.with_name(radar.stem + "_resized.png"))
+                        pil = pil.resize((max(1, new_w), max(1, new_h)), PILImage.LANCZOS)
+                        pil.save(resized_path, format="PNG")
+
+                    # construct image for ReportLab
+                    rimg = RLImage(resized_path, width=new_w, height=new_h)
+                    rimg.hAlign = "CENTER"
+
+                    # wrap radar + legend in KeepTogether to avoid splits/overlaps
+                    kt = [Spacer(1, 6), rimg, Spacer(1, 8)]
+                    for line in legend_lines:
+                        kt.append(Paragraph(line, styles["AP_Small"]))
+                        kt.append(Spacer(1, 2))
+                    flow.append(KeepTogether(kt))
+                    flow.append(Spacer(1, 10))
+                except Exception as e:
+                    # fallback: embed basic image (but still sanitize legend)
+                    try:
+                        fallback = RLImage(str(radar), width=120 * mm, height=120 * mm)
+                        fallback.hAlign = "CENTER"
+                        flow.append(Spacer(1, 6))
+                        flow.append(fallback)
+                        flow.append(Spacer(1, 8))
+                        for line in legend_lines:
+                            flow.append(Paragraph(line, styles["AP_Small"]))
+                            flow.append(Spacer(1, 2))
+                        flow.append(Spacer(1, 10))
+                    except Exception:
+                        # last fallback: only add legend text so PDF remains readable
+                        for line in legend_lines:
+                            flow.append(Paragraph(line, styles["AP_Small"]))
+                            flow.append(Spacer(1, 2))
+
+
+
+        # doctor note + signature
+        if wow and wow.get("doctor_note"):
+            flow.append(
+                Paragraph(f"<i>{wow.get('doctor_note')}</i>", styles["AP_Body"])
+            )
+            sig = APP_DIR / "signature.png"
+            if sig.exists():
+                try:
+                    s_img = RLImage(str(sig), width=40 * mm, height=15 * mm)
+                    flow.append(Spacer(1, 4))
+                    flow.append(s_img)
+                except:
+                    pass
+        flow.append(PageBreak())
+
+        # Executive summary & charts
         flow.append(Paragraph("Executive summary", styles["AP_Heading"]))
-        exec_lines = []
-        if prakriti_pct:
-            try:
-                exec_lines.append(f"Constitutional predominance: {max(prakriti_pct, key=prakriti_pct.get)}.")
-            except Exception:
-                pass
-        if vikriti_pct:
-            try:
-                exec_lines.append(f"Primary current imbalance: {max(vikriti_pct, key=vikriti_pct.get)}.")
-            except Exception:
-                pass
-        if psych_pct:
-            try:
-                top_psy = max(psych_pct, key=psych_pct.get)
-                exec_lines.append(f"Psychometric snapshot indicates: {_psy_label_map.get(top_psy.strip().lower(), top_psy.title())}.")
-            except Exception:
-                pass
-        if wow and wow.get("hero"):
-            exec_lines.append(_neutralize_personal_tone(wow.get("hero")))
-        for line in exec_lines:
-            flow.append(Paragraph(line, styles["AP_Body"]))
+        flow.append(
+            Paragraph(
+                "This report summarises constitutional profile (Prakriti), current imbalances (Vikriti), psychometric snapshot and prioritized recommendations.",
+                styles["AP_Body"],
+            )
+        )
         flow.append(Spacer(1, 8))
 
-        # Charts area: use table layout and conservative heights
+        # Add bar charts (if created)
         try:
-            chart_cells = []
-            if p1.exists():
-                img1 = RLImage(str(p1), width=85 * mm, height=38 * mm)
-                chart_cells.append(img1)
-            else:
-                chart_cells.append(Paragraph('Prakriti chart unavailable', styles['AP_Body']))
-            if p2.exists():
-                img2 = RLImage(str(p2), width=85 * mm, height=38 * mm)
-                chart_cells.append(img2)
-            else:
-                chart_cells.append(Paragraph('Vikriti chart unavailable', styles['AP_Body']))
-
-            # table with two columns
-            flow.append(Table([chart_cells], colWidths=[85 * mm, 85 * mm], hAlign='CENTER'))
-            flow.append(Spacer(1, 6))
-
+            if p1.exists() and p2.exists():
+                img1 = RLImage(str(p1), width=85 * mm, height=45 * mm)
+                img2 = RLImage(str(p2), width=85 * mm, height=45 * mm)
+                flow.append(Table([[img1, img2]], colWidths=[90 * mm, 90 * mm]))
+                flow.append(Spacer(1, 6))
             if p3.exists():
-                img3 = RLImage(str(p3), width=160 * mm, height=40 * mm)
+                img3 = RLImage(str(p3), width=160 * mm, height=35 * mm)
                 flow.append(img3)
                 flow.append(Spacer(1, 6))
         except Exception:
             logger.exception("Adding chart images failed")
 
-        # Radar / triangle diagram OR legend fallback
-        if radar.exists():
-            try:
-                flow.append(RLImage(str(radar), width=120 * mm, height=120 * mm))
-                flow.append(Paragraph("<i>Prakriti–Vikriti radar (triangle) chart</i>", styles["AP_Small"]))
-                flow.append(Spacer(1, 8))
-            except Exception:
-                logger.exception("Adding radar failed; adding legend fallback")
-                flow.append(_legend_table(styles))
-                flow.append(Spacer(1, 8))
-        else:
-            flow.append(_legend_table(styles))
-            flow.append(Spacer(1, 8))
-
-        # Prakriti / Vikriti tables
-        flow.append(Paragraph("Prakriti — percentage distribution", styles["AP_Heading"]))
-        pp = [[k, f"{v} %"] for k, v in (prakriti_pct or {}).items()]
-        if pp:
-            tpp = Table(pp, colWidths=[80 * mm, 80 * mm])
-            tpp.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.25, colors.lightgrey), ("LEFTPADDING", (0,0), (-1,-1), 6)]))
-            flow.append(tpp)
-            flow.append(Spacer(1, 6))
-
-        flow.append(Paragraph("Vikriti — percentage distribution (today)", styles["AP_Heading"]))
-        vp = [[k, f"{v} %"] for k, v in (vikriti_pct or {}).items()]
-        if vp:
-            tvp = Table(vp, colWidths=[80 * mm, 80 * mm])
-            tvp.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.25, colors.lightgrey), ("LEFTPADDING", (0,0), (-1,-1), 6)]))
-            flow.append(tvp)
-            flow.append(Spacer(1, 8))
-
-        # Personalised guideline insertion (sanitised)
-        if guideline_text:
-            flow.append(Paragraph("Personalised Ayurvedic Guideline", styles["AP_Heading"]))
-            flow.append(Spacer(1, 4))
-            for para in guideline_text.split("\n\n"):
-                if not para.strip():
-                    continue
-                flow.append(Paragraph(_neutralize_personal_tone(para.strip()).replace("\n", "<br/>"), styles["AP_Body"]))
-                flow.append(Spacer(1, 4))
-
-        # Dosha-specific priority actions (simpler)
-        try:
-            dominant_vikriti = max(vikriti_pct, key=vikriti_pct.get) if vikriti_pct else None
-        except Exception:
-            dominant_vikriti = None
-
-        if dominant_vikriti == "Vata":
-            priority = [
-                ("Start today (Vata grounding)", "Warm water on waking; 5–10 min gentle oil rub + slow stretch; warm cooked meals."),
-                ("This week", "3 days of gentle 20–25 min walk; fix sleep/wake time; reduce screen exposure after 9 PM."),
-                ("This month", "Stabilise meal timings; 2–3 days/week light yoga; keep home warm and organised."),
-            ]
-        elif dominant_vikriti == "Pitta":
-            priority = [
-                ("Start today (Pitta cooling)", "Room-temperature water; 5–10 min cooling breath (Sheetali); prefer cooling foods; avoid spicy/heavy meals."),
-                ("This week", "3 days moderate walk (avoid peak heat); reduce stimulants after 4 PM; start calming routines."),
-                ("This month", "Cultivate relaxed work rhythm; consistent hydration; add cooling spices like coriander, fennel."),
-            ]
-        elif dominant_vikriti == "Kapha":
-            priority = [
-                ("Start today (Kapha lightening)", "Warm water with dry ginger; 5–10 min brisk stretch; choose lighter meals; avoid day naps."),
-                ("This week", "4 days brisk 20–30 min walk; wake 15–20 min earlier; reduce refined sugar."),
-                ("This month", "Build morning activity habit; move every 60–90 minutes; add warming spices."),
-            ]
-        else:
-            priority = [
-                ("Start today", "Warm water on waking; 5–10 min light stretch; eat freshly cooked food."),
-                ("This week", "3 days 20–25 min walk; fix waking time; light digestion ritual."),
-                ("This month", "Regular meals & sleep; weekly light home-cleaning; pick one small habit."),
-            ]
-
-        cols_cells = []
-        for title, text in priority:
-            txt = text.replace("\n", "<br/>")
-            cols_cells.append(Paragraph(f"<b>{title}</b><br/>{txt}", styles["AP_Body"]))
-
-        strip_tbl = Table([cols_cells], colWidths=[60 * mm, 60 * mm, 60 * mm])
-        strip_tbl.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,-1), colors.Color(0.96,0.98,0.96)), ("BOX", (0,0), (-1,-1), 0.5, colors.lightgrey), ("VALIGN",(0,0),(-1,-1),"TOP"), ("ALIGN",(0,0),(-1,-1),"LEFT"), ("LEFTPADDING",(0,0),(-1,-1),6), ("RIGHTPADDING",(0,0),(-1,-1),6)]))
-        flow.append(strip_tbl)
+        # Prakriti/Vikriti Tables
+        flow.append(
+            Paragraph("Prakriti — percentage distribution", styles["AP_Heading"])
+        )
+        pp = [[k, f"{v} %"] for k, v in prakriti_pct.items()]
+        tpp = Table(pp, colWidths=[80 * mm, 80 * mm])
+        tpp.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        flow.append(tpp)
+        flow.append(Spacer(1, 6))
+        flow.append(
+            Paragraph("Vikriti — percentage distribution (today)", styles["AP_Heading"])
+        )
+        vp = [[k, f"{v} %"] for k, v in vikriti_pct.items()]
+        tvp = Table(vp, colWidths=[80 * mm, 80 * mm])
+        tvp.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        flow.append(tvp)
         flow.append(Spacer(1, 8))
 
-        # Recommendations — career (personalised, unique)
+                # Priority action strip — vertical arrangement for readability (consolidated guidance)
+        flow.append(Paragraph("Integrated Guidance Plan (phased adoption)", styles["AP_Heading"]))
+        # Start today
+        flow.append(Paragraph("<b>Start Today</b>", styles["AP_Body"]))
+        flow.append(Paragraph("Warm water on waking; 5–10 min warm oil rub or stretch; one focused 60–90 min work block.", styles["AP_Bullet"]))
+        flow.append(Spacer(1, 4))
+        # This week
+        flow.append(Paragraph("<b>Start This Week</b>", styles["AP_Body"]))
+        flow.append(Paragraph("Add a second focused work block; daily 20–35 min walk; begin a small micro-project.", styles["AP_Bullet"]))
+        flow.append(Spacer(1, 4))
+        # This month
+        flow.append(Paragraph("<b>Start This Month</b>", styles["AP_Body"]))
+        flow.append(Paragraph("Finish and share one creative/structured project; set weekly accountability.", styles["AP_Bullet"]))
+        flow.append(Spacer(1, 8))
+        flow.append(Paragraph("<i>Note:</i> 'Start Today' indicates foundational actions to begin immediately. 'Start This Week' and 'Start This Month' indicate phased additions rather than strict calendar rules.", styles["AP_Small"]))
+        flow.append(Spacer(1, 8))
+
+
+        # Recommendations short blocks
         flow.append(Paragraph("Recommendations — prioritized", styles["AP_Heading"]))
         flow.append(Paragraph("<b>Career</b>:", styles["AP_Body"]))
-        if career_recs:
-            # compute overall dominant keys for context
-            try:
-                prakriti_top = max(prakriti_pct, key=prakriti_pct.get) if prakriti_pct else None
-            except Exception:
-                prakriti_top = None
-            try:
-                psych_top = max(psych_pct, key=psych_pct.get) if psych_pct else None
-            except Exception:
-                psych_top = None
-
-            # Instead of returning identical cr['reason'] for each, create custom rationales
-            for cr in career_recs[:8]:
-                rationale = _career_rationale_for_report(cr, prakriti_pct or {}, vikriti_pct or {}, psych_pct or {})
-                flow.append(Paragraph(f"• {rationale}", styles["AP_Bullet"]))
-        else:
-            flow.append(Paragraph("No career recommendations available.", styles["AP_Body"]))
+        for cr in career_recs[:6]:
+            flow.append(
+                Paragraph(
+                    f"• <b>{cr['role']}</b> — score {cr['score']}. <i>{cr['reason']}</i>",
+                    styles["AP_Bullet"],
+                )
+            )
+        flow.append(Spacer(1, 6))
+        flow.append(Paragraph("<b>Relationship tips</b>:", styles["AP_Body"]))
+        for t in rel_tips:
+            flow.append(Paragraph(f"• <b>{t[0]}</b> — {t[1]}", styles["AP_Bullet"]))
+        flow.append(Spacer(1, 6))
+        flow.append(Paragraph("<b>Health (diet & lifestyle)</b>:", styles["AP_Body"]))
+        for d in health_recs.get("diet", []):
+            flow.append(Paragraph(f"• {d}", styles["AP_Bullet"]))
+        for l in health_recs.get("lifestyle", []):
+            flow.append(Paragraph(f"• {l}", styles["AP_Bullet"]))
         flow.append(Spacer(1, 8))
 
-        # Relationship tips
-        flow.append(Paragraph("<b>Relationship tips</b>:", styles["AP_Body"]))
-        if rel_tips:
-            for t in rel_tips:
-                title = _neutralize_personal_tone(t[0]) if isinstance(t, (list, tuple)) and t else (t if isinstance(t, str) else "")
-                body = _neutralize_personal_tone(t[1]) if isinstance(t, (list, tuple)) and len(t) > 1 else ""
-                flow.append(Paragraph(f"• <b>{title}</b> — {body}", styles["AP_Body"]))
-        else:
-            flow.append(Paragraph("No relationship tips available.", styles["AP_Body"]))
-        flow.append(Spacer(1,8))
-
-        # Health suggestions
-        flow.append(Paragraph("Health — diet & lifestyle suggestions", styles["AP_Heading"]))
-        if health_recs:
-            for d in health_recs.get("diet", []):
-                flow.append(Paragraph(f"• {_neutralize_personal_tone(d)}", styles["AP_Bullet"]))
-            for l in health_recs.get("lifestyle", []):
-                flow.append(Paragraph(f"• {_neutralize_personal_tone(l)}", styles["AP_Bullet"]))
-            herbs = health_recs.get("herbs", [])
-            if herbs:
-                flow.append(Paragraph("Herbs & cautions:", styles["AP_Body"]))
-                for h in herbs:
-                    flow.append(Paragraph(f"• {_neutralize_personal_tone(h)}", styles["AP_Bullet"]))
-        else:
-            flow.append(Paragraph("No health suggestions available.", styles["AP_Body"]))
-        flow.append(Spacer(1,8))
-
-        # Appendix
+        # Appendices / wow plan
         if include_appendix and wow:
             flow.append(PageBreak())
-            flow.append(Paragraph("APPENDIX — Transformation Plan", styles["AP_Heading"]))
-            flow.append(Spacer(1,6))
-            if wow.get("plan"):
-                for line in wow.get("plan", "").split("\n"):
-                    if line.strip():
-                        flow.append(Paragraph(_neutralize_personal_tone(line.strip()), styles["AP_Body"]))
-                flow.append(Spacer(1,6))
-            if wow.get("habit_stack"):
-                flow.append(Paragraph("Daily habit stack", styles["AP_Heading"]))
-                for line in wow.get("habit_stack", "").split("\n"):
-                    if line.strip():
-                        flow.append(Paragraph(_neutralize_personal_tone(line.strip()), styles["AP_Body"]))
-                flow.append(Spacer(1,6))
-            if wow.get("checklist"):
-                flow.append(Paragraph("One-page checklist", styles["AP_Heading"]))
-                for line in wow.get("checklist", "").split("\n"):
-                    if line.strip():
-                        flow.append(Paragraph(_neutralize_personal_tone(line.strip()), styles["AP_Body"]))
-                flow.append(Spacer(1,6))
+            flow.append(
+                Paragraph(
+                    "APPENDIX — Transformation & Practical Plan", styles["AP_Heading"]
+                )
+            )
+            flow.append(Spacer(1, 6))
+            flow.append(
+                Paragraph("<b>90-day transformation plan</b>", styles["AP_Body"])
+            )
+            for line in wow["plan"].split("\n"):
+                flow.append(Paragraph(line, styles["AP_Body"]))
+            flow.append(Spacer(1, 6))
+            flow.append(Paragraph("<b>Daily habit stack</b>", styles["AP_Body"]))
+            for line in wow["habit_stack"].split("\n"):
+                flow.append(Paragraph(line, styles["AP_Body"]))
+            flow.append(Spacer(1, 6))
+            flow.append(Paragraph("<b>Concrete tips</b>", styles["AP_Body"]))
+            for line in wow["wow_tips"].split("\n"):
+                flow.append(Paragraph(line, styles["AP_Body"]))
+            flow.append(Spacer(1, 6))
+            flow.append(Paragraph("<b>One-page checklist</b>", styles["AP_Body"]))
+            for line in wow["checklist"].split("\n"):
+                flow.append(Paragraph(line, styles["AP_Body"]))
 
-        # Doctor highlighted note
-        if doctor_note:
-            flow.append(Spacer(1, 8))
-            docnote_clean = _neutralize_personal_tone(doctor_note)
-            boxed = Table([[Paragraph(docnote_clean, styles["AP_Body"])]], colWidths=[A4[0] - 36 * mm])
-            boxed.setStyle(TableStyle([("BACKGROUND",(0,0),(0,0),colors.HexColor("#FFF8B3")), ("BOX",(0,0),(-1,-1),0.75,colors.HexColor("#CCCC66")), ("LEFTPADDING",(0,0),(-1,-1),8), ("RIGHTPADDING",(0,0),(-1,-1),8), ("TOPPADDING",(0,0),(-1,-1),6), ("BOTTOMPADDING",(0,0),(-1,-1),6)]))
-            flow.append(boxed)
-            flow.append(Spacer(1,8))
-
-        # contact/footer small block
-        flow.append(Spacer(1,12))
-        contact_par = f"{BRAND.get('clinic_name')} — {BRAND.get('doctor')} — {BRAND.get('phone')}"
+        # Contact/footer
+        flow.append(Spacer(1, 18))
+        contact_par = (
+            f"{BRAND.get('clinic_name')} — {BRAND.get('doctor')} — {BRAND.get('phone')}"
+        )
         flow.append(Paragraph(contact_par, styles["AP_Small"]))
         flow.append(Paragraph(BRAND.get("address", ""), styles["AP_Small"]))
 
-        # watermark & footer draw
+        # Watermark and footer function
         def _draw_page_footer_and_watermark(canvas_obj, doc_obj):
             try:
                 canvas_obj.saveState()
                 W, H = A4
                 try:
-                    canvas_obj.setFont("Helvetica-Bold", 36)
+                    if DEJAVU_PATH:
+                        canvas_obj.setFont("DejaVuSans", 36)
+                    else:
+                        canvas_obj.setFont("Helvetica-Bold", 36)
                 except Exception:
                     canvas_obj.setFont("Helvetica-Bold", 36)
                 opacity = float(wconf.get("watermark_opacity", 0.06))
                 try:
                     canvas_obj.setFillAlpha(opacity)
                 except Exception:
-                    canvas_obj.setFillColorRGB(0.85, 0.85, 0.85)
+                    canvas_obj.setFillColorRGB(0.7, 0.7, 0.7)
                 canvas_obj.translate(W / 2.0, H / 2.0)
                 canvas_obj.rotate(30)
-                canvas_obj.drawCentredString(0, 0, wconf.get("watermark_text", BRAND.get("clinic_name", "")))
+                canvas_obj.drawCentredString(
+                    0, 0, wconf.get("watermark_text", BRAND["clinic_name"])
+                )
                 canvas_obj.restoreState()
             except Exception:
                 logger.exception("Watermark draw failed")
-
             try:
                 canvas_obj.saveState()
                 footer_y = 18 * mm
@@ -618,84 +1239,854 @@ def branded_pdf_report(
                 canvas_obj.setLineWidth(0.5)
                 canvas_obj.line(18 * mm, footer_y + 8, (A4[0] - 18 * mm), footer_y + 8)
                 logo_path_local = APP_DIR / "logo.png"
+                signature_path = (
+                    Path(wconf.get("footer_signature_file", ""))
+                    if wconf.get("footer_signature_file")
+                    else None
+                )
                 x = 20 * mm
                 if wconf.get("show_footer_logo", True) and logo_path_local.exists():
                     try:
-                        reader = RLImage(str(logo_path_local), width=0, height=0)
-                        # drawImage via canvas directly
-                        canvas_obj.drawImage(str(logo_path_local), x, footer_y - 2, width=20 * mm, height=8 * mm, mask="auto")
-                        x += 20 * mm + 4
+                        reader = ImageReader(str(logo_path_local))
+                        iw, ih = reader.getSize()
+                        target_h = 10 * mm
+                        scale = target_h / ih
+                        canvas_obj.drawImage(
+                            str(logo_path_local),
+                            x,
+                            footer_y - 2,
+                            width=iw * scale,
+                            height=ih * scale,
+                            mask="auto",
+                        )
+                        x += (iw * scale) + 4
                     except Exception:
                         logger.exception("Footer logo draw error")
+                elif (
+                    wconf.get("use_footer_signature", False)
+                    and signature_path
+                    and signature_path.exists()
+                ):
+                    try:
+                        reader = ImageReader(str(signature_path))
+                        iw, ih = reader.getSize()
+                        target_h = 10 * mm
+                        scale = target_h / ih
+                        canvas_obj.drawImage(
+                            str(signature_path),
+                            x,
+                            footer_y - 2,
+                            width=iw * scale,
+                            height=ih * scale,
+                            mask="auto",
+                        )
+                        x += (iw * scale) + 4
+                    except Exception:
+                        logger.exception("Footer signature draw error")
                 try:
-                    canvas_obj.setFont("Helvetica", 8)
+                    if DEJAVU_PATH:
+                        canvas_obj.setFont("DejaVuSans", 8)
+                    else:
+                        canvas_obj.setFont("Helvetica", 8)
                 except Exception:
                     canvas_obj.setFont("Helvetica", 8)
-                contact_line = f"{BRAND.get('clinic_name','')} — {BRAND.get('phone','')}"
-                # shorten if too long
-                if len(contact_line) > 90:
-                    contact_line = f"{BRAND.get('clinic_name','')} — {BRAND.get('phone','')}"
+                contact_line = f"{BRAND.get('clinic_name')} — {BRAND.get('phone')} — {BRAND.get('email')}"
                 canvas_obj.setFillColor(colors.HexColor("#444444"))
-                canvas_obj.drawString(18 * mm if x < 18 * mm + 2 else x, footer_y, contact_line)
+                canvas_obj.drawString(
+                    18 * mm if x < 18 * mm + 2 else x, footer_y, contact_line
+                )
                 fmt = wconf.get("page_number_format", "Page {page}")
                 try:
                     page_num = canvas_obj.getPageNumber()
                 except Exception:
                     page_num = doc_obj.page
-                page_text = fmt.format(page=page_num)
+                if "{total}" in fmt:
+                    page_text = fmt.replace("{page}", "%d").replace("{total}", "%d") % (
+                        page_num,
+                        page_num,
+                    )
+                else:
+                    page_text = fmt.format(page=page_num)
                 canvas_obj.drawRightString(A4[0] - 18 * mm, footer_y, page_text)
                 canvas_obj.restoreState()
             except Exception:
                 logger.exception("Footer drawing failed")
 
-        # build document
-        doc.build(flow, onFirstPage=_draw_page_footer_and_watermark, onLaterPages=_draw_page_footer_and_watermark)
+        doc.build(
+            flow,
+            onFirstPage=_draw_page_footer_and_watermark,
+            onLaterPages=_draw_page_footer_and_watermark,
+        )
         buf.seek(0)
-
-        # cleanup temporary images
+        # cleanup temp images
         for p in [p1, p2, p3, radar]:
             try:
                 if p.exists():
                     p.unlink()
-            except Exception:
+            except:
                 pass
-
         return buf
-
     except Exception:
         tb = traceback.format_exc()
         logger.exception("Platypus build failed: %s", tb)
         snippet = tb[:1200]
-        # fallback minimal PDF
-        try:
-            from reportlab.pdfgen import canvas
-            fallback_buf = BytesIO()
-            c = canvas.Canvas(fallback_buf, pagesize=A4)
-            left = 18 * mm
-            top = A4[1] - 18 * mm
+        return _fallback_canvas_pdf(
+            patient,
+            prakriti_pct,
+            vikriti_pct,
+            psych_pct,
+            career_recs,
+            rel_tips,
+            health_recs,
+            error_text=snippet,
+            include_appendix=include_appendix,
+            report_id=report_id,
+            wconf=wconf,
+            wow=wow,
+        )
+
+
+def _fallback_canvas_pdf(
+    patient,
+    prakriti_pct,
+    vikriti_pct,
+    psych_pct,
+    career_recs,
+    rel_tips,
+    health_recs,
+    error_text=None,
+    include_appendix=False,
+    report_id=None,
+    wconf=None,
+    wow=None,
+):
+    if wconf is None:
+        wconf = WCONF
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    left = 18 * mm
+    top = A4[1] - 18 * mm
+    y = top
+    try:
+        logo_path = APP_DIR / "logo.png"
+        if logo_path.exists():
+            try:
+                reader = ImageReader(str(logo_path))
+                iw, ih = reader.getSize()
+                scale = min((36 * mm) / iw, (36 * mm) / ih, 1.0)
+                c.drawImage(
+                    str(logo_path),
+                    left,
+                    y - (36 * mm),
+                    width=iw * scale,
+                    height=ih * scale,
+                    mask="auto",
+                )
+            except Exception:
+                pass
+        c.setFont("Helvetica-Bold", 13)
+        c.drawString(left, y - 6, BRAND.get("clinic_name", ""))
+        y -= 24
+        c.setFont("Helvetica", 9)
+        c.drawString(left, y, f"Patient: {patient.get('name','')}")
+        c.drawString(left + 220, y, f"Date: {datetime.now().strftime('%Y-%m-%d')}")
+        y -= 16
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(left, y, "Prakriti:")
+        y -= 12
+        c.setFont("Helvetica", 9)
+        for k, v in prakriti_pct.items():
+            c.drawString(left + 6, y, f"{k}: {v} %")
+            y -= 10
+            if y < 60 * mm:
+                c.showPage()
+                y = top
+        c.drawString(left, y, "Vikriti:")
+        y -= 12
+        for k, v in vikriti_pct.items():
+            c.drawString(left + 6, y, f"{k}: {v} %")
+            y -= 10
+            if y < 60 * mm:
+                c.showPage()
+                y = top
+        c.drawString(left, y, "Top recommendations:")
+        y -= 12
+        for cr in career_recs[:10]:
+            c.drawString(left + 6, y, f"- {cr.get('role')} (score {cr.get('score')})")
+            y -= 10
+            if y < 60 * mm:
+                c.showPage()
+                y = top
+        if include_appendix and wow:
+            c.showPage()
             y = top
-            c.setFont("Helvetica-Bold", 13)
-            c.drawString(left, y - 6, BRAND.get('clinic_name', ''))
-            y -= 24
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(left, y, "APPENDIX — Transformation Plan")
+            y -= 14
             c.setFont("Helvetica", 9)
-            c.drawString(left, y, f"Patient: {patient.get('name','')}")
-            c.drawString(left + 220, y, f"Date: {datetime.now().strftime('%Y-%m-%d')}")
-            y -= 16
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(left, y, "Prakriti:")
-            y -= 12
-            c.setFont("Helvetica", 9)
-            for k, v in (prakriti_pct or {}).items():
-                c.drawString(left + 6, y, f"{k}: {v} %")
+            for line in wow.get("plan", "").split("\n"):
+                c.drawString(left, y, line)
                 y -= 10
-                if y < 60 * mm:
+                if y < 40 * mm:
                     c.showPage()
                     y = top
-            c.save()
-            fallback_buf.seek(0)
-            return fallback_buf
-        except Exception:
-            logger.exception("Fallback PDF generation also failed")
-            raise
+            for line in wow.get("habit_stack", "").split("\n"):
+                c.drawString(left, y, line)
+                y -= 10
+                if y < 40 * mm:
+                    c.showPage()
+                    y = top
+        if error_text:
+            c.showPage()
+            y = top
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(left, y, "Report engine error (short):")
+            y -= 14
+            c.setFont("Helvetica", 8)
+            for line in _wrap_text_simple(error_text, 120):
+                c.drawString(left, y, line)
+                y -= 8
+                if y < 30 * mm:
+                    c.showPage()
+                    y = top
+        # footer
+        footer_y = 18 * mm
+        c.setStrokeColor(colors.lightgrey)
+        c.line(18 * mm, footer_y + 8, (A4[0] - 18 * mm), footer_y + 8)
+        if wconf.get("show_footer_logo", True) and (APP_DIR / "logo.png").exists():
+            try:
+                reader = ImageReader(str(APP_DIR / "logo.png"))
+                iw, ih = reader.getSize()
+                target_h = 10 * mm
+                scale = target_h / ih
+                c.drawImage(
+                    str(APP_DIR / "logo.png"),
+                    left,
+                    footer_y - 2,
+                    width=iw * scale,
+                    height=ih * scale,
+                    mask="auto",
+                )
+            except:
+                pass
+        c.setFont("Helvetica", 8)
+        c.drawString(
+            left + 40,
+            footer_y,
+            f"{BRAND['clinic_name']} — {BRAND['phone']}",
+        )
+        c.save()
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        # Log the exception and return a minimal error PDF so the caller still receives a BytesIO object.
+        logger.exception("Fallback PDF generation failed: %s", e)
+        err_buf = BytesIO()
+        ec = canvas.Canvas(err_buf, pagesize=A4)
+        ec.setFont("Helvetica-Bold", 12)
+        ec.drawString(18 * mm, A4[1] - 30 * mm, "Error generating report")
+        ec.setFont("Helvetica", 9)
+        msg = str(e) if e else "Unknown error"
+        for i, line in enumerate(_wrap_text_simple(msg, 90)):
+            ec.drawString(18 * mm, A4[1] - (40 * mm + i * 8), line)
+        if error_text:
+            # include the shorter engine error if provided
+            for j, line in enumerate(_wrap_text_simple(error_text, 90)):
+                ec.drawString(18 * mm, A4[1] - (60 * mm + (i + j + 1) * 8), line)
+        ec.save()
+        err_buf.seek(0)
+        return err_buf
 
-# End of file
+
+def make_ics_followup(patient_name, days=7):
+    start = (datetime.now() + timedelta(days=days)).strftime("%Y%m%dT090000")
+    dtstamp = datetime.now().strftime("%Y%m%dT%H%M00")
+    ics = f"BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTAMP:{dtstamp}\nDTSTART:{start}\nSUMMARY:Follow-up — {patient_name}\nDESCRIPTION:Review Ayurveda plan and progress.\nEND:VEVENT\nEND:VCALENDAR"
+    return ics.encode("utf-8")
+
+
+# ---------------- Streamlit UI start ----------------
+st.set_page_config(page_title=CONFIG["meta"]["app_name"], layout="wide")
+st.markdown(
+    "<style>section[data-testid='stSidebar'] {background-color: #f7f7fa}</style>",
+    unsafe_allow_html=True,
+)
+header_col, right_col = st.columns([6, 4])
+with header_col:
+    st.title(CONFIG["meta"]["app_name"])
+    st.caption(
+        f"Version {CONFIG['meta'].get('version','')} — {CONFIG['meta'].get('author','')}"
+    )
+with right_col:
+    st.write(datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+# ---------------- Authentication sidebar ----------------
+st.sidebar.subheader("Login")
+username = st.sidebar.text_input("Username")
+password = st.sidebar.text_input("Password", type="password")
+if "auth" not in st.session_state:
+    st.session_state.auth = False
+if st.sidebar.button("Login"):
+    ok, info = verify_user(username, password)
+    if ok:
+        st.session_state.auth = True
+        st.session_state.user = username
+        st.session_state.user_info = info
+        st.sidebar.success(f"Welcome {info['display_name']} ({info['role']})")
+    else:
+        st.sidebar.error("Invalid username/password")
+if not st.session_state.auth:
+    st.info("Please login from the sidebar (default admin / admin123).")
+    st.stop()
+st.sidebar.markdown("---")
+st.sidebar.write("Role: " + st.session_state.user_info.get("role", "clinician"))
+
+# ---------------- App tabs ----------------
+tabs = st.tabs(
+    ["Patient Registry", "New Assessment", "Clinician Dashboard", "Config & Export"]
+)
+
+# ----- Tab 1: Patient Registry -----
+with tabs[0]:
+    st.header("Patient Registry")
+    with st.expander("Create new patient"):
+        with st.form("new_patient_form"):
+            pname = st.text_input("Full name")
+            page = st.number_input("Age", min_value=0, max_value=120, value=30)
+            pgender = st.selectbox(
+                "Gender", ["Male", "Female", "Other", "Prefer not to say"]
+            )
+            pcontact = st.text_input("Contact (phone/email)")
+            if st.form_submit_button("Create patient"):
+                if not pname:
+                    st.warning("Name required")
+                else:
+                    pid = create_patient(pname, page, pgender, pcontact)
+                    st.success(f"Patient created (id: {pid})")
+    st.write("### All patients")
+    patients_df = load_patients()
+    st.dataframe(patients_df)
+
+# ----- Tab 2: New Assessment -----
+with tabs[1]:
+    st.header("New Assessment — Prakriti, Vikriti & Psychometrics")
+    patients = load_patients()
+    if patients.empty:
+        st.info("No patients yet. Create one in Patient Registry.")
+        st.stop()
+    psel = st.selectbox(
+        "Select patient",
+        options=patients["id"].tolist(),
+        format_func=lambda x: f"{int(x)} - {patients.loc[patients['id']==x,'name'].values[0]}",
+    )
+    patient_row = patients[patients["id"] == psel].iloc[0].to_dict()
+    st.markdown(
+        f"**Patient:** {patient_row['name']} | Age: {patient_row['age']} | Gender: {patient_row['gender']}"
+    )
+    st.markdown("---")
+
+    # Render Prakriti questions dynamically (two-column)
+    pr_qs = CONFIG["questions"]["prakriti"]
+    pr_answers = {}
+    cols = st.columns(2)
+    for i, q in enumerate(pr_qs):
+        with cols[i % 2]:
+            pr_answers[q["id"]] = st.slider(q["text"], 1, 5, 3, key=f"pr_{q['id']}")
+    # Vikriti (three-column)
+    vk_qs = CONFIG["questions"]["vikriti"]
+    vk_answers = {}
+    cols = st.columns(3)
+    for i, q in enumerate(vk_qs):
+        with cols[i % 3]:
+            vk_answers[q["id"]] = st.slider(q["text"], 1, 5, 1, key=f"vk_{q['id']}")
+    # Psychometric (two-column, 1-7)
+    psy_qs = CONFIG["questions"]["psychometric"]
+    psy_answers = {}
+    cols = st.columns(2)
+    for i, q in enumerate(psy_qs):
+        with cols[i % 2]:
+            psy_answers[q["id"]] = st.slider(q["text"], 1, 7, 4, key=f"psy_{q['id']}")
+    st.markdown("---")
+
+    show_long_preview = st.checkbox(
+        "Show long recommendations on screen (preview)", value=False
+    )
+    if st.button("Compute & Save Assessment"):
+        # compute scores
+        prak_pct = score_dosha_from_answers(pr_answers, pr_qs)
+        vik_pct = score_dosha_from_answers(vk_answers, vk_qs)
+        psych_pct = psychometric_tipiscale(psy_answers)
+        career = recommend_career(prak_pct, psych_pct)
+        rel = recommend_relationship(prak_pct, psych_pct)
+        health = recommend_health(prak_pct, vik_pct)
+        payload = {
+            "patient": patient_row,
+            "prakriti_answers": pr_answers,
+            "vikriti_answers": vk_answers,
+            "psych_answers": psy_answers,
+            "prakriti_pct": prak_pct,
+            "vikriti_pct": vik_pct,
+            "psych_pct": psych_pct,
+            "career_recs": career,
+            "relationship_tips": rel,
+            "health_recs": health,
+            "created_at": datetime.now().isoformat(),
+        }
+        aid = save_assessment(patient_row["id"], st.session_state.user, payload)
+        # generate wow advice and attach
+        wow = generate_wow_advice(
+            patient_row, prak_pct, vik_pct, psych_pct, career, rel, health
+        )
+        payload["wow"] = wow
+        st.session_state["last_assessment"] = payload
+        st.session_state["last_aid"] = aid
+        st.success(f"Assessment saved (id: {aid})")
+
+    # if assessment exists in session, show preview & downloads
+    if "last_assessment" in st.session_state:
+        payload = st.session_state["last_assessment"]
+        prak_pct = payload["prakriti_pct"]
+        vik_pct = payload["vikriti_pct"]
+        psych_pct = payload["psych_pct"]
+        career = payload["career_recs"]
+        rel = payload["relationship_tips"]
+        health = payload["health_recs"]
+        wow = payload.get("wow", {})
+
+        st.markdown("### Results snapshot (most recent)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Dominant Prakriti", max(prak_pct, key=prak_pct.get))
+        c2.metric("Current Aggravation", max(vik_pct, key=vik_pct.get))
+        # psych_pct max label
+        try:
+            max_psy = max(psych_pct, key=psych_pct.get)
+        except:
+            max_psy = next(iter(psych_pct.keys()))
+        c3.metric("Dominant Trait", max_psy)
+
+        # Visuals: inline radar
+        radar_preview = TMP_DIR / f"preview_radar_{int(datetime.now().timestamp())}.png"
+        try:
+            make_radar_chart(prak_pct, vik_pct, radar_preview)
+            st.image(str(radar_preview), width=360)
+            try:
+                radar_preview.unlink()
+            except:
+                pass
+        except Exception:
+            logger.exception("Radar preview failed")
+
+        st.write("#### Career recommendations (top 5)")
+        for r in career[:5]:
+            st.write(f"- {r['role']} (score: {r['score']})  —  {r.get('reason','')}")
+        st.write("#### Relationship tips")
+        for t in rel:
+            st.write("- " + t[0] + " — " + t[1])
+        st.write("#### Health suggestions")
+        st.write("Diet: " + ", ".join(health["diet"]))
+        st.write("Lifestyle: " + ", ".join(health["lifestyle"]))
+        st.write("Herbs: " + ", ".join(health["herbs"]))
+
+        st.markdown("---")
+        # priority strip UI
+        st.write("### Priority actions")
+        st.markdown(
+            """
+        <div style='display:flex;gap:10px;margin-bottom:12px'>
+          <div style='background:#e8f7ee;padding:12px;border-radius:8px;flex:1'>
+            <b>Start today</b><br>Warm water, 5 min oil rub, one focused 60–90 min block
+          </div>
+          <div style='background:#fff4e5;padding:12px;border-radius:8px;flex:1'>
+            <b>This week</b><br>Add daily walk, add second block, start micro-project
+          </div>
+          <div style='background:#eef6ff;padding:12px;border-radius:8px;flex:1'>
+            <b>This month</b><br>Finish & share 1 project; weekly accountability
+          </div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+        st.write("### One-line insight (hero)")
+        st.info(wow.get("hero", ""))
+
+        if show_long_preview:
+            st.write("### Life-changing 90-day plan (preview)")
+            st.text(wow.get("plan", ""))
+            st.write("### Habit stack (daily)")
+            st.text(wow.get("habit_stack", ""))
+            st.write("### One-page checklist")
+            st.text(wow.get("checklist", ""))
+
+        include_appendix = st.checkbox(
+            "Include full transformation appendix in PDF", value=True
+        )
+        effective_wconf = WCONF.copy()
+        if "pdf_wconf" in st.session_state:
+            effective_wconf.update(st.session_state["pdf_wconf"])
+
+        if st.button("Prepare Branded PDF (full report)"):
+            pdf_b = branded_pdf_report(
+                payload["patient"],
+                prak_pct,
+                vik_pct,
+                psych_pct,
+                career,
+                rel,
+                health,
+                include_appendix=include_appendix,
+                report_id=st.session_state.get("last_aid"),
+                wconf=effective_wconf,
+                wow=wow,
+            )
+            st.session_state["last_pdf"] = pdf_b.getvalue()
+            st.success("Branded PDF prepared — download below.")
+            st.balloons()
+        if "last_pdf" in st.session_state:
+            st.download_button(
+                "Download Branded PDF (professional)",
+                data=BytesIO(st.session_state["last_pdf"]),
+                file_name=f"Branded_Report_{payload['patient']['name']}_{st.session_state.get('last_aid')}.pdf",
+                mime="application/pdf",
+            )
+        else:
+            # fallback directly prepare for download
+            pdf_b = branded_pdf_report(
+                payload["patient"],
+                prak_pct,
+                vik_pct,
+                psych_pct,
+                career,
+                rel,
+                health,
+                include_appendix=include_appendix,
+                report_id=st.session_state.get("last_aid"),
+                wconf=effective_wconf,
+                wow=wow,
+            )
+            st.download_button(
+                "Download Branded PDF (professional)",
+                pdf_b,
+                file_name=f"Branded_Report_{payload['patient']['name']}_{st.session_state.get('last_aid')}.pdf",
+                mime="application/pdf",
+            )
+
+
+# ---------------- DOCX generator (ensure this is at top-level, not indented) ----------------
+def docx_report(
+    patient,
+    prakriti_pct,
+    vikriti_pct,
+    psych_pct,
+    career_recs,
+    rel_tips,
+    health_recs,
+    wow=None,
+):
+    doc = Document()
+    doc.add_heading(
+        f"{BRAND.get('clinic_name','Clinic')} — Personalized Report", level=1
+    )
+    doc.add_paragraph(
+        f"Name: {patient.get('name','')}    Age: {patient.get('age','')}    Gender: {patient.get('gender','')}"
+    )
+    doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+    if wow and wow.get("hero"):
+        doc.add_heading("Executive one-line", level=2)
+        doc.add_paragraph(wow.get("hero"))
+
+    doc.add_heading("Prakriti (constitutional) %", level=2)
+    for k, v in (prakriti_pct or {}).items():
+        doc.add_paragraph(f"{k}: {v} %", style="List Bullet")
+
+    doc.add_heading("Vikriti (today) %", level=2)
+    for k, v in (vikriti_pct or {}).items():
+        doc.add_paragraph(f"{k}: {v} %", style="List Bullet")
+
+    doc.add_heading("Psychometric summary (approx)", level=2)
+    for k, v in (psych_pct or {}).items():
+        doc.add_paragraph(f"{k}: {v} %", style="List Bullet")
+
+    doc.add_heading("Potential Employment Roles suggestions (ranked)", level=2)
+    for cr in career_recs or []:
+        doc.add_paragraph(
+            f"{cr.get('role','Unknown')} (score: {cr.get('score','')})",
+            style="List Number",
+        )
+
+    doc.add_heading("Relationship tips", level=2)
+    for t in rel_tips or []:
+        # tolerate tuples/lists or strings
+        if isinstance(t, (list, tuple)) and len(t) >= 2:
+            doc.add_paragraph(f"{t[0]} — {t[1]}", style="List Bullet")
+        else:
+            doc.add_paragraph(str(t), style="List Bullet")
+
+    doc.add_heading("Health & lifestyle", level=2)
+    doc.add_paragraph(
+        "Diet: " + ", ".join(health_recs.get("diet", [])) if health_recs else "Diet: -"
+    )
+    doc.add_paragraph(
+        "Lifestyle: " + ", ".join(health_recs.get("lifestyle", []))
+        if health_recs
+        else "Lifestyle: -"
+    )
+    doc.add_paragraph(
+        "Herbs & cautions: " + ", ".join(health_recs.get("herbs", []))
+        if health_recs
+        else "Herbs & cautions: -"
+    )
+
+    if wow:
+        doc.add_heading("Transformation Plan (summary)", level=2)
+        doc.add_paragraph(wow.get("plan", ""))
+        doc.add_heading("Daily habit stack", level=3)
+        doc.add_paragraph(wow.get("habit_stack", ""))
+
+    bio = BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio
+
+    docx_b = docx_report(
+        payload["patient"], prak_pct, vik_pct, psych_pct, career, rel, health, wow
+    )
+    st.download_button(
+        "Download DOCX report",
+        docx_b,
+        file_name=f"Report_{payload['patient']['name']}_{st.session_state.get('last_aid')}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    action_pdf = onepage_actionplan_pdf(
+        payload["patient"], wow.get("checklist", ""), wow.get("hero", "")
+    )
+    st.download_button(
+        "Download 1-page Action Plan (PDF)",
+        action_pdf,
+        file_name=f"ActionPlan_{payload['patient']['name']}.pdf",
+        mime="application/pdf",
+    )
+
+    # follow-up ICS
+    ics = make_ics_followup(payload["patient"]["name"], days=7)
+    st.download_button(
+        "Download follow-up (.ics)",
+        data=ics,
+        file_name=f"followup_{payload['patient']['name']}.ics",
+        mime="text/calendar",
+    )
+
+
+# ===== Part 3 of full app =====
+# Continues the big merged file — admin + dashboard + config + utilities
+
+# ----- Tab 3: Clinician Dashboard -----
+with tabs[2]:
+    st.header("Clinician Dashboard")
+    st.subheader("Recent assessments")
+    asses = load_assessments()
+    if asses.empty:
+        st.info("No assessments yet")
+    else:
+        st.dataframe(asses[["id", "patient_id", "assessor", "created_at"]].head(80))
+        sel = st.number_input("Open assessment id", min_value=0, value=0, step=1)
+        if sel > 0:
+            cur.execute("SELECT data_json FROM assessments WHERE id=?", (int(sel),))
+            r = cur.fetchone()
+            if r:
+                try:
+                    st.json(json.loads(r[0]))
+                except Exception:
+                    st.text(r[0])
+            else:
+                st.warning("Not found")
+
+    st.markdown("---")
+    st.subheader("User & Admin management")
+    role = st.session_state.user_info.get("role", "clinician")
+    if role != "admin":
+        st.info("User management features visible to admin only.")
+    else:
+        with st.form("create_user_form"):
+            un = st.text_input("Username")
+            dn = st.text_input("Display name")
+            pw = st.text_input("Password", type="password")
+            rrole = st.selectbox("Role", ["clinician", "admin"])
+            if st.form_submit_button("Create user"):
+                if not un or not pw:
+                    st.warning("Provide username & password")
+                else:
+                    ph = pwd_context.hash(pw)
+                    try:
+                        cur.execute(
+                            "INSERT INTO users (username, display_name, password_hash, role, created_at) VALUES (?,?,?,?,?)",
+                            (un, dn, ph, rrole, datetime.now().isoformat()),
+                        )
+                        conn.commit()
+                        st.success("User created")
+                    except Exception as e:
+                        st.error("Error: " + str(e))
+
+    st.markdown("---")
+    st.subheader("DB & exports")
+    if st.button("Download SQLite DB"):
+        data = export_sqlite_db_bytes()
+        st.download_button(
+            "Download DB file",
+            data=data,
+            file_name="ayurprakriti.db",
+            mime="application/octet-stream",
+        )
+    st.write("Quick actions:")
+    if st.button("Clear tmp files"):
+        for p in TMP_DIR.glob("*"):
+            try:
+                p.unlink()
+            except:
+                pass
+        st.success("Temp files removed")
+
+# ----- Tab 4: Config & Export -----
+with tabs[3]:
+    st.header("Config & Export")
+    st.subheader("Branding & files")
+    st.write("Upload logo (PNG/JPG) and optional signature to appear on PDF.")
+    logo_file = st.file_uploader("Upload logo (png/jpg)", type=["png", "jpg", "jpeg"])
+    if logo_file is not None:
+        save_path = APP_DIR / "logo.png"
+        with open(save_path, "wb") as f:
+            f.write(logo_file.getbuffer())
+        st.success("Logo uploaded")
+    sig_file = st.file_uploader(
+        "Upload footer signature (PNG/JPG)", type=["png", "jpg", "jpeg"]
+    )
+    if sig_file is not None:
+        sig_save = APP_DIR / "signature.png"
+        with open(sig_save, "wb") as f:
+            f.write(sig_file.getbuffer())
+        WCONF["footer_signature_file"] = str(sig_save)
+        st.success("Signature uploaded")
+
+    st.subheader("Clinic details (branding)")
+    with st.form("branding_form"):
+        BRAND["clinic_name"] = st.text_input(
+            "Clinic / Brand Name", value=BRAND["clinic_name"]
+        )
+        BRAND["tagline"] = st.text_input("Tagline", value=BRAND["tagline"])
+        BRAND["doctor"] = st.text_input(
+            "Doctor Name & Qualifications", value=BRAND["doctor"]
+        )
+        BRAND["address"] = st.text_input("Clinic Address", value=BRAND["address"])
+        BRAND["phone"] = st.text_input("Phone", value=BRAND["phone"])
+        BRAND["email"] = st.text_input("Email", value=BRAND["email"])
+        BRAND["website"] = st.text_input("Website", value=BRAND["website"])
+        BRAND["accent_color"] = st.text_input(
+            "Accent color (hex)", value=BRAND["accent_color"]
+        )
+        if st.form_submit_button("Save branding"):
+            st.success("Branding updated")
+
+    st.markdown("---")
+    st.subheader("PDF watermark & footer settings")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        wm_text = st.text_input(
+            "Watermark text", value=WCONF.get("watermark_text", BRAND["clinic_name"])
+        )
+        wm_op = st.slider(
+            "Watermark opacity (0.01 - 0.2)",
+            min_value=0.01,
+            max_value=0.2,
+            value=float(WCONF.get("watermark_opacity", 0.06)),
+            step=0.01,
+        )
+        show_logo = st.checkbox(
+            "Show footer logo", value=WCONF.get("show_footer_logo", True)
+        )
+    with col_b:
+        use_sig = st.checkbox(
+            "Use footer signature image instead of logo",
+            value=WCONF.get("use_footer_signature", False),
+        )
+        page_fmt = st.selectbox(
+            "Page number format",
+            options=["Page {page}", "Page {page} of {total}"],
+            index=0,
+        )
+    if st.button("Save PDF/Watermark settings"):
+        WCONF["watermark_text"] = wm_text
+        WCONF["watermark_opacity"] = float(wm_op)
+        WCONF["show_footer_logo"] = bool(show_logo)
+        WCONF["use_footer_signature"] = bool(use_sig)
+        WCONF["page_number_format"] = page_fmt
+        st.session_state["pdf_wconf"] = WCONF.copy()
+        st.success("PDF watermark & footer settings saved")
+
+    st.markdown("---")
+    st.subheader("Edit config (advanced, YAML)")
+    cfg_text = yaml.safe_dump(CONFIG, sort_keys=False)
+    new_cfg_text = st.text_area("Edit YAML config", cfg_text, height=300)
+    if st.button("Save config file"):
+        try:
+            newcfg = yaml.safe_load(new_cfg_text)
+            save_ok, err = save_config(newcfg)
+            if save_ok:
+                st.success("Config saved. Restart app to apply new questions.")
+            else:
+                st.error("Save failed: " + err)
+        except Exception as e:
+            st.error("Invalid YAML: " + str(e))
+
+    st.markdown("---")
+    st.subheader("Export & housekeeping")
+    conn.commit()
+    with open(DB_PATH, "rb") as f:
+        dbdata = f.read()
+    st.download_button(
+        "Download SQLite DB",
+        data=dbdata,
+        file_name="ayurprakriti.db",
+        mime="application/octet-stream",
+    )
+    st.markdown("---")
+    st.caption(
+        "Next steps: consider Postgres migration for multi-user access and OAuth for secure logins."
+    )
+
+# Footer small
+st.write("---")
+st.caption(
+    f"{BRAND.get('clinic_name')} — Personalized Ayurveda Reports. Use responsibly."
+)
+# ===== Part 4 of full app =====
+# Final utilities, cleanup, and helpful README note appended to file
+
+# ---------------- Final helper: small README as string ----------------
+APP_README = f"""
+AyurPrakriti Pro Mega — single-file app
+Location: {APP_DIR}
+Database: {DB_PATH}
+Reports: {REPORTS_DIR}
+Run: streamlit run AyurPrakriti_Pro_Mega.py
+Default admin: username=admin password=admin123 (change immediately)
+Place DejaVuSans.ttf at {FONTS_DIR} to enable nicer PDF fonts.
+"""
+
+# show README in admin tab if user is admin
+try:
+    if st.session_state.user_info.get("role") == "admin":
+        with st.expander("App README & paths (admin)"):
+            st.code(APP_README)
+except Exception:
+    pass
+
+# ---------------- Graceful message after run ----------------
+logger.info("AyurPrakriti Pro Mega started at %s", datetime.now().isoformat())
+
+# ---------------- End of file ----------------
+# If you want subsequent tweaks:
+# - Matching hex palette to logo: upload logo; I'll auto-suggest accent color and update BRAND.
+# - Add QR link generation and online storage for shareable report.
+# - Add analytics: track patient adherence and progress graphs.
